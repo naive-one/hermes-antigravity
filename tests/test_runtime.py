@@ -186,6 +186,122 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(client.calls[0], "gemini-3.9-flash-high")
         catalog.assert_called_once()
 
+    @patch("hermes_antigravity.runtime.time.sleep", return_value=None)
+    @patch("hermes_antigravity.runtime.load_agy_keychain_credentials", return_value={})
+    @patch("hermes_antigravity.runtime.fetch_available_models", return_value={})
+    def test_transient_429_retries_same_account(self, _catalog, _keychain, _sleep):
+        class TransientClient:
+            def __init__(self):
+                self.calls = []
+
+            def generate(self, *, access_token, body):
+                self.calls.append(access_token)
+                if len(self.calls) < 3:
+                    raise AntigravityError(
+                        "Resource has been exhausted (e.g. check quota).",
+                        status=429,
+                    )
+                return {
+                    "candidates": [
+                        {
+                            "content": {"role": "model", "parts": [{"text": "recovered"}]},
+                            "finishReason": "STOP",
+                        }
+                    ],
+                    "usageMetadata": {},
+                }
+
+        client = TransientClient()
+        result = generate_chat_completion(
+            {
+                "model": "google-antigravity/gemini-3.8-flash",
+                "messages": [{"role": "user", "content": "ping"}],
+            },
+            client=client,
+            store=FakeStore(),
+        )
+        self.assertEqual(result["choices"][0]["message"]["content"], "recovered")
+        self.assertEqual(client.calls, ["tok-a", "tok-a", "tok-a"])
+
+    @patch("hermes_antigravity.runtime.load_agy_keychain_credentials", return_value={})
+    @patch(
+        "hermes_antigravity.runtime.fetch_available_models",
+        return_value={
+            "gemini-3.1-pro-high": {
+                "model": "MODEL_PLACEHOLDER_M37",
+                "displayName": "Gemini 3.1 Pro (High)",
+            }
+        },
+    )
+    @patch(
+        "hermes_antigravity.runtime.refresh_access_token",
+        return_value={
+            "access_token": "tok-new",
+            "refresh_token": "refresh-a",
+            "expires_at": 99999999999,
+        },
+    )
+    def test_post_refresh_404_can_discover_runtime(self, refresh, catalog, _keychain):
+        class RefreshStore:
+            def ordered_credentials(self):
+                return [
+                    (
+                        "a@example.com",
+                        {
+                            "email": "a@example.com",
+                            "access_token": "tok-old",
+                            "refresh_token": "refresh-a",
+                            "project_id": "p",
+                        },
+                    )
+                ]
+
+            def upsert(self, creds, activate=True):
+                return "a@example.com"
+
+        class RefreshClient:
+            def __init__(self):
+                self.calls = []
+
+            def generate(self, *, access_token, body):
+                self.calls.append((access_token, body["model"]))
+                if access_token == "tok-old":
+                    from hermes_antigravity.errors import TokenExpired
+                    raise TokenExpired()
+                if body["model"] == "gemini-pro-agent":
+                    raise AntigravityError("model not found", status=404)
+                return {
+                    "candidates": [
+                        {
+                            "content": {"role": "model", "parts": [{"text": "dynamic after refresh"}]},
+                            "finishReason": "STOP",
+                        }
+                    ],
+                    "usageMetadata": {},
+                }
+
+        client = RefreshClient()
+        result = generate_chat_completion(
+            {
+                "model": "google-antigravity/gemini-3.1-pro",
+                "messages": [{"role": "user", "content": "ping"}],
+                "reasoning_effort": "high",
+            },
+            client=client,
+            store=RefreshStore(),
+        )
+        self.assertEqual(result["choices"][0]["message"]["content"], "dynamic after refresh")
+        self.assertEqual(
+            client.calls,
+            [
+                ("tok-old", "gemini-pro-agent"),
+                ("tok-new", "gemini-pro-agent"),
+                ("tok-new", "gemini-3.1-pro-high"),
+            ],
+        )
+        refresh.assert_called_once()
+        catalog.assert_called_once()
+
     @patch("hermes_antigravity.runtime.load_agy_keychain_credentials", return_value={})
     @patch("hermes_antigravity.runtime.fetch_available_models", return_value={})
     def test_429_rotates_account(self, _catalog, _keychain):

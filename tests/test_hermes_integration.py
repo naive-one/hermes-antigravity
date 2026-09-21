@@ -27,7 +27,10 @@ def _completion(content):
 
 class HermesIntegrationTests(unittest.TestCase):
     def test_provider_profile_registers_with_installed_hermes_contract(self):
-        import providers
+        try:
+            import providers
+        except ModuleNotFoundError:
+            self.skipTest("Hermes Agent is not installed in the standalone plugin test environment")
         import hermes_antigravity.hermes_provider as module
 
         captured = {}
@@ -41,7 +44,10 @@ class HermesIntegrationTests(unittest.TestCase):
         self.assertEqual(captured["profile"].name, "antigravity")
 
     def test_provider_profile_supplies_native_auxiliary_client(self):
-        import providers
+        try:
+            import providers
+        except ModuleNotFoundError:
+            self.skipTest("Hermes Agent is not installed in the standalone plugin test environment")
         import hermes_antigravity.hermes_provider as module
 
         captured = {}
@@ -160,6 +166,12 @@ class HermesIntegrationTests(unittest.TestCase):
             self.assertEqual(profile.name, "antigravity")
             self.assertEqual(profile.auth_type, "api_key")
             self.assertTrue(profile.supports_model_listing)
+            self.assertIsNotNone(
+                profile.create_client(
+                    api_key="hermes-antigravity",
+                    base_url="http://127.0.0.1:8765/v1",
+                )
+            )
             self.assertEqual(
                 profile.native_reasoning_details_type,
                 "antigravity.native_assistant",

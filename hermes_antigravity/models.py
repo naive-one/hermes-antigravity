@@ -189,8 +189,26 @@ def resolve_wire_model_id(model: str, effort: str | None = None) -> str:
 def get_max_output_tokens(model: str, runtime_model: str | None = None) -> int:
     if runtime_model and runtime_model in RUNTIME_MAX_OUTPUT_TOKENS:
         return RUNTIME_MAX_OUTPUT_TOKENS[runtime_model]
+    if runtime_model:
+        if runtime_model.startswith("claude-"):
+            return 64000
+        if runtime_model.startswith("gpt-oss-") or runtime_model.startswith("openai/gpt-oss-"):
+            return 32768
+        if runtime_model.startswith("gemini-3.1-pro") or runtime_model == "gemini-pro-agent":
+            return 65535
+        if runtime_model.startswith("gemini-"):
+            return 65536
     logical = strip_provider_prefix(normalize_model_id(model))
-    return KNOWN_MODELS.get(f"{ANTIGRAVITY_PREFIX}{logical}", 8192)
+    known = KNOWN_MODELS.get(f"{ANTIGRAVITY_PREFIX}{logical}")
+    if known is not None:
+        return known
+    if logical.startswith("claude-"):
+        return 64000
+    if logical.startswith("gpt-oss-"):
+        return 32768
+    if logical.startswith("gemini-"):
+        return 65536
+    return 8192
 
 
 def get_fallback_runtime_model(runtime_model: str, effort: str | None = None) -> str | None:
@@ -255,13 +273,33 @@ def public_model_from_runtime(runtime_id: str) -> str | None:
     return None
 
 
+def _selectable_runtime(runtime_id: str, info: Any = None) -> bool:
+    rid = (runtime_id or "").strip()
+    if not (
+        rid.startswith("gemini-")
+        or rid.startswith("claude-")
+        or rid.startswith("gpt-oss-")
+    ):
+        return False
+    if any(ch.isspace() for ch in rid) or rid.startswith("MODEL_"):
+        return False
+    if rid.lower().startswith(("chat_", "tab_")) or "image" in rid.lower():
+        return False
+    if isinstance(info, dict) and info.get("isInternal"):
+        return False
+    return True
+
+
 def public_models_from_catalog(models: dict[str, Any] | None) -> list[str]:
     dynamic: list[str] = []
     seen: set[str] = set()
 
     if isinstance(models, dict):
-        for runtime_id in models:
-            public = public_model_from_runtime(str(runtime_id))
+        for runtime_id, info in models.items():
+            runtime_id = str(runtime_id)
+            if not _selectable_runtime(runtime_id, info):
+                continue
+            public = public_model_from_runtime(runtime_id)
             if not public:
                 continue
             model = f"{ANTIGRAVITY_PREFIX}{public}"

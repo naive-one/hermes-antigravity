@@ -167,6 +167,20 @@ Before inference, `fetchAvailableModels` is queried and cached. Live
 Model discovery failure does not block inference; the conservative routing table
 is still usable.
 
+## Streaming status
+
+The Antigravity transport itself consumes Google's SSE stream, including
+thinking/tool-call parts, but **v1 currently aggregates those events into one
+OpenAI-shaped completion before returning control to Hermes**. In other words,
+protocol streaming is used internally, but Hermes does not yet receive native
+incremental text/thinking deltas from this port.
+
+This does not change model quality, tool calling, fallback, or token accounting;
+it mainly affects time-to-visible-first-token and live thinking display. A
+future version can move this integration to Hermes' provider-specific
+`create_client()` transport hook to expose native streaming without changing
+the Antigravity protocol modules.
+
 ## Architecture
 
 ```text

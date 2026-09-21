@@ -65,7 +65,10 @@ def _get_json(url: str, headers: dict[str, str]) -> dict[str, Any]:
 
 
 def oauth_client() -> tuple[str, str]:
-    return CLIENT_ID, CLIENT_SECRET
+    return (
+        (os.getenv("ANTIGRAVITY_CLIENT_ID") or CLIENT_ID).strip(),
+        (os.getenv("ANTIGRAVITY_CLIENT_SECRET") or CLIENT_SECRET).strip(),
+    )
 
 
 def refresh_access_token(

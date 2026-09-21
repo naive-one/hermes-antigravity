@@ -68,6 +68,10 @@ class OpenAICompatTests(unittest.TestCase):
         self.assertEqual(details[0]["type"], "antigravity.native_assistant")
         self.assertEqual(details[0]["parts"][0]["thoughtSignature"], "abcdabcd")
         self.assertEqual(details[0]["parts"][1]["thoughtSignature"], "efghefgh")
+        obj = openai_completion_object(completion)
+        self.assertIsInstance(obj.choices[0].message.reasoning_details, list)
+        self.assertIsInstance(obj.choices[0].message.reasoning_details[0], dict)
+        self.assertIsInstance(obj.choices[0].message.reasoning_details[0]["parts"][0], dict)
 
 
 if __name__ == "__main__":

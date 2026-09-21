@@ -26,7 +26,12 @@ def _is_hard_quota_error(exc: AntigravityError) -> bool:
     if exc.status != 429:
         return False
     text = str(exc).lower()
-    if "individual quota reached" in text or "resets in " in text or "reset in " in text:
+    if (
+        "individual quota reached" in text
+        or "quota reached" in text
+        or "resets in " in text
+        or "reset in " in text
+    ):
         return True
     if "rate limit" in text or "rate-limit" in text:
         return False

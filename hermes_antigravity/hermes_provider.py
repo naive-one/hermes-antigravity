@@ -50,6 +50,11 @@ def register_provider_profile() -> bool:
         return False
 
     class AntigravityProfile(ProviderProfile):
+        def create_client(self, **client_kwargs: Any) -> Any:
+            from .hermes_client import AntigravityHermesClient
+
+            return AntigravityHermesClient(**client_kwargs)
+
         def build_api_kwargs_extras(
             self,
             *,
@@ -81,24 +86,23 @@ def register_provider_profile() -> bool:
         def default_vision_model(self) -> str | None:
             return DEFAULT_MODEL
 
-    register_provider(
-        AntigravityProfile(
-            name=PROVIDER_NAME,
-            aliases=("google-antigravity", "agy"),
-            display_name="Google Antigravity",
-            description="Google Antigravity / Cloud Code Assist via hermes-antigravity",
-            env_vars=(PLACEHOLDER_API_KEY_ENV,),
-            base_url=DUMMY_BASE_URL,
-            auth_type="api_key",
-            supports_health_check=False,
-            supports_model_listing=True,
-            supports_vision=True,
-            fallback_models=tuple(KNOWN_MODELS),
-            default_aux_model=DEFAULT_MODEL,
-            fixed_temperature=OMIT_TEMPERATURE,
-            native_reasoning_details_type="antigravity.native_assistant",
-        )
+    profile = AntigravityProfile(
+        name=PROVIDER_NAME,
+        aliases=("google-antigravity", "agy"),
+        display_name="Google Antigravity",
+        description="Google Antigravity / Cloud Code Assist via hermes-antigravity",
+        env_vars=(PLACEHOLDER_API_KEY_ENV,),
+        base_url=DUMMY_BASE_URL,
+        auth_type="api_key",
+        supports_health_check=False,
+        supports_model_listing=True,
+        supports_vision=True,
+        fallback_models=tuple(KNOWN_MODELS),
+        default_aux_model=DEFAULT_MODEL,
+        fixed_temperature=OMIT_TEMPERATURE,
     )
+    profile.native_reasoning_details_type = "antigravity.native_assistant"
+    register_provider(profile)
     return True
 
 

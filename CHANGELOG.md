@@ -4,6 +4,11 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Hermes auxiliary models:** Supply an in-process OpenAI-compatible client through `ProviderProfile.create_client()` so title generation, compression, vision, and other auxiliary calls use the Antigravity transport instead of the placeholder loopback URL. Sync, async, and aggregated streaming calls are supported.
+- **Hermes compatibility:** Register native reasoning metadata without passing a constructor field that is unavailable in Hermes Agent v0.21.3.
+
 ## [0.8.0] - 2026-09-20
 
 ### Added

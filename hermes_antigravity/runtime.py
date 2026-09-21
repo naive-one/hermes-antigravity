@@ -419,7 +419,7 @@ def ensure_provider_profile_files(root: Path | None = None) -> Path:
     (plugin_dir / "plugin.yaml").write_text(
         "name: antigravity\n"
         "kind: model-provider\n"
-        "version: 1.0.0\n"
+        "version: 1.0.1\n"
         "description: Google Antigravity provider supplied by hermes-antigravity\n",
         encoding="utf-8",
     )

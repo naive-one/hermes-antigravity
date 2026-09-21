@@ -31,7 +31,8 @@ agents:
 - multiple Google accounts with automatic failover on hard quota/429 errors;
 - Cloud Code project discovery/onboarding;
 - quota probing;
-- image data URLs and OpenAI/Hermes tool schemas.
+- image data URLs and OpenAI/Hermes tool schemas;
+- native Hermes main and auxiliary-model routing through `ProviderProfile.create_client()`.
 
 ## Install
 
@@ -176,17 +177,18 @@ protocol streaming is used internally, but Hermes does not yet receive native
 incremental text/thinking deltas from this port.
 
 This does not change model quality, tool calling, fallback, or token accounting;
-it mainly affects time-to-visible-first-token and live thinking display. A
-future version can move this integration to Hermes' provider-specific
-`create_client()` transport hook to expose native streaming without changing
-the Antigravity protocol modules.
+it mainly affects time-to-visible-first-token and live thinking display. Hermes'
+provider-specific `create_client()` hook now routes both main-agent and auxiliary
+requests through this transport. Until the Antigravity SSE events are exposed as
+native incremental Hermes deltas, streaming callers receive one aggregated
+OpenAI-compatible chunk.
 
 ## Architecture
 
 ```text
 Hermes Agent
    │
-   ├─ ProviderProfile
+   ├─ ProviderProfile + native create_client transport
    ├─ llm_execution middleware
    └─ hermes agy CLI
           │
@@ -199,6 +201,7 @@ hermes_antigravity/
    ├─ transform.py     Hermes/OpenAI → Antigravity wire
    ├─ client.py        SSE + endpoint failover
    ├─ runtime.py       model/account recovery
+   ├─ hermes_client.py main + auxiliary OpenAI-compatible facade
    └─ openai_compat.py Antigravity → Hermes response
           │
           ▼

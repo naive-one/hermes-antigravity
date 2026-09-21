@@ -2,22 +2,31 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 import time
-import uuid
 from copy import deepcopy
 from typing import Any
 
 from .models import (
     get_max_output_tokens,
     get_model_enum,
-    normalize_model_id,
     normalize_effort,
+    normalize_model_id,
     resolve_wire_model_id,
-    strip_provider_prefix,
 )
 
-SKIP_THOUGHT_SIGNATURE = "skip_thought_signature_validator"
+ANTIGRAVITY_SYSTEM_INSTRUCTION = (
+    "You are Antigravity, a powerful agentic AI coding assistant designed by Google DeepMind. "
+    "You are pair programming with a user to solve coding tasks. Be concise, practical, and tool-aware."
+)
+ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION = (
+    'CRITICAL: NEVER output rule checks, formatting guidelines, constraint checklists '
+    '(e.g. "No emdashes"), or your thinking/personality preambles in the final response. '
+    "Output only the final response."
+)
+CONTINUATION_TEXT = "Continue the active task using the available instructions and context."
+_BASE64_SIGNATURE_PATTERN = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 
 
 def thinking_config(runtime_model: str, effort: str | None) -> dict[str, Any] | None:
@@ -44,18 +53,23 @@ def thinking_config(runtime_model: str, effort: str | None) -> dict[str, Any] | 
     return None
 
 
+def _sanitize_text(value: Any) -> str:
+    text = str(value or "")
+    return "".join("\ufffd" if 0xD800 <= ord(ch) <= 0xDFFF else ch for ch in text)
+
+
 def _content_text(content: Any) -> str:
     if content is None:
         return ""
     if isinstance(content, str):
-        return content
+        return _sanitize_text(content)
     if isinstance(content, list):
         texts: list[str] = []
         for item in content:
             if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
-                texts.append(item["text"])
+                texts.append(_sanitize_text(item["text"]))
         return "\n".join(texts)
-    return str(content)
+    return _sanitize_text(content)
 
 
 def _parts_from_content(content: Any) -> list[dict[str, Any]]:
@@ -65,19 +79,27 @@ def _parts_from_content(content: Any) -> list[dict[str, Any]]:
             if not isinstance(item, dict):
                 continue
             if item.get("type") == "text" and isinstance(item.get("text"), str) and item["text"].strip():
-                part: dict[str, Any] = {"text": item["text"]}
+                part: dict[str, Any] = {"text": _sanitize_text(item["text"])}
                 signature = item.get("thoughtSignature") or item.get("thought_signature") or item.get("textSignature")
-                if isinstance(signature, str) and signature:
+                if _valid_thought_signature(signature):
                     part["thoughtSignature"] = signature
                 parts.append(part)
-            elif item.get("type") == "image_url":
-                image = item.get("image_url")
-                url = image.get("url") if isinstance(image, dict) else None
-                if isinstance(url, str) and url.startswith("data:") and ";base64," in url:
-                    meta, data = url.split(",", 1)
-                    mime = meta[5:].split(";", 1)[0] or "application/octet-stream"
-                    parts.append({"inlineData": {"mimeType": mime, "data": data}})
+            elif item.get("type") in {"image_url", "image"}:
+                if item.get("type") == "image_url":
+                    image = item.get("image_url")
+                    raw = image.get("url") if isinstance(image, dict) else None
+                    explicit_mime = None
                 else:
+                    source = item.get("source") if isinstance(item.get("source"), dict) else {}
+                    raw = item.get("data") or source.get("data")
+                    explicit_mime = item.get("mimeType") or item.get("mediaType") or source.get("mediaType")
+                if isinstance(raw, str) and raw.startswith("data:") and ";base64," in raw:
+                    meta, data = raw.split(",", 1)
+                    mime = explicit_mime or meta[5:].split(";", 1)[0] or "image/png"
+                    parts.append({"inlineData": {"mimeType": mime, "data": data.strip()}})
+                elif isinstance(raw, str) and item.get("type") == "image":
+                    parts.append({"inlineData": {"mimeType": explicit_mime or "image/png", "data": raw.strip()}})
+                elif raw:
                     parts.append({"text": "[image omitted]"})
         return parts
     text = _content_text(content)
@@ -96,9 +118,61 @@ def _parse_args(raw: Any) -> dict[str, Any]:
     return {}
 
 
+def _resolve_local_pointer(ref: str, root: Any) -> Any:
+    if ref == "#":
+        return root
+    if not ref.startswith("#/"):
+        raise ValueError(f"unsupported non-local schema reference: {ref}")
+    current = root
+    for token in ref[2:].split("/"):
+        key = token.replace("~1", "/").replace("~0", "~")
+        if isinstance(current, list):
+            if not key.isdigit() or int(key) >= len(current):
+                raise ValueError(f"unresolved schema reference: {ref}")
+            current = current[int(key)]
+        elif isinstance(current, dict) and key in current:
+            current = current[key]
+        else:
+            raise ValueError(f"unresolved schema reference: {ref}")
+    return current
+
+
+def _dereference_schema(schema: Any) -> Any:
+    root = deepcopy(schema)
+    nodes = 0
+
+    def walk(value: Any, refs: tuple[str, ...] = (), depth: int = 0) -> Any:
+        nonlocal nodes
+        nodes += 1
+        if nodes > 10000 or depth > 64:
+            raise ValueError("tool schema is too deep or too large")
+        if isinstance(value, list):
+            return [walk(v, refs, depth + 1) for v in value]
+        if not isinstance(value, dict):
+            return value
+
+        ref = value.get("$ref")
+        if isinstance(ref, str):
+            if ref in refs:
+                raise ValueError(f"recursive schema reference: {ref}")
+            target = _resolve_local_pointer(ref, root)
+            resolved = walk(deepcopy(target), refs + (ref,), depth + 1)
+            siblings = {k: v for k, v in value.items() if k != "$ref"}
+            if siblings:
+                siblings = walk(siblings, refs, depth + 1)
+                if isinstance(resolved, dict) and isinstance(siblings, dict):
+                    return {**resolved, **siblings}
+            return resolved
+
+        return {k: walk(v, refs, depth + 1) for k, v in value.items()}
+
+    return walk(root)
+
+
 def _clean_schema(schema: Any) -> dict[str, Any]:
     if not isinstance(schema, dict):
         return {"type": "object", "properties": {}}
+    dereferenced = _dereference_schema(schema)
     banned = {
         "$schema",
         "$defs",
@@ -106,6 +180,7 @@ def _clean_schema(schema: Any) -> dict[str, Any]:
         "additionalProperties",
         "patternProperties",
         "unevaluatedProperties",
+        "unevaluatedItems",
     }
 
     def clean(value: Any) -> Any:
@@ -115,7 +190,7 @@ def _clean_schema(schema: Any) -> dict[str, Any]:
             return [clean(v) for v in value]
         return value
 
-    out = clean(deepcopy(schema))
+    out = clean(dereferenced)
     if not isinstance(out, dict):
         return {"type": "object", "properties": {}}
     out.setdefault("type", "object")
@@ -123,21 +198,30 @@ def _clean_schema(schema: Any) -> dict[str, Any]:
     return out
 
 
-def _tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+def _tools(tools: list[dict[str, Any]], runtime_model: str) -> list[dict[str, Any]] | None:
     declarations: list[dict[str, Any]] = []
+    use_legacy_parameters = runtime_model.startswith("claude-") or runtime_model.startswith("gpt-oss-")
     for tool in tools or []:
         if not isinstance(tool, dict) or tool.get("type") != "function":
             continue
         fn = tool.get("function")
         if not isinstance(fn, dict) or not fn.get("name"):
             continue
-        declarations.append(
-            {
-                "name": fn["name"],
-                "description": fn.get("description") or "",
-                "parameters": _clean_schema(fn.get("parameters")),
-            }
-        )
+        try:
+            schema = _clean_schema(fn.get("parameters"))
+        except ValueError:
+            # Current pi-antigravity skips a declaration whose local schema
+            # references cannot be resolved rather than sending invalid JSON.
+            continue
+        declaration: dict[str, Any] = {
+            "name": fn["name"],
+            "description": fn.get("description") or "",
+        }
+        if use_legacy_parameters:
+            declaration["parameters"] = schema
+        else:
+            declaration["parametersJsonSchema"] = schema
+        declarations.append(declaration)
     return [{"functionDeclarations": declarations}] if declarations else None
 
 
@@ -158,46 +242,98 @@ def _tool_config(tools: list[dict[str, Any]], tool_choice: Any, runtime_model: s
     return None
 
 
-def _session_id(messages: list[dict[str, Any]]) -> str:
-    for message in messages:
-        if message.get("role") == "user":
-            text = _content_text(message.get("content"))
-            if text.strip():
-                digest = hashlib.sha256(text.encode("utf-8")).digest()[:8]
-                return "-" + str(int.from_bytes(digest, "big") & ((1 << 63) - 1))
-    return "-" + str(secrets.randbelow(9_000_000_000_000_000_000))
+def _valid_thought_signature(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value) % 4 == 0
+        and bool(_BASE64_SIGNATURE_PATTERN.fullmatch(value))
+    )
+
+
+def _gemini_requires_thought_signature(runtime_model: str) -> bool:
+    if not runtime_model.startswith("gemini-"):
+        return False
+    match = re.match(r"^gemini-(\d+)", runtime_model)
+    return not match or int(match.group(1)) >= 3
 
 
 def _tool_call_signature(tool_call: dict[str, Any]) -> str | None:
     for key in ("thoughtSignature", "thought_signature", "signature"):
         value = tool_call.get(key)
-        if isinstance(value, str) and value:
+        if _valid_thought_signature(value):
             return value
     extra = tool_call.get("extra_content")
     if isinstance(extra, dict):
         google = extra.get("google")
         if isinstance(google, dict):
             value = google.get("thought_signature") or google.get("thoughtSignature")
-            if isinstance(value, str) and value:
+            if _valid_thought_signature(value):
                 return value
     return None
 
 
-def _requires_thought_signature(runtime_model: str) -> bool:
-    return runtime_model.startswith("gemini-")
+def _sanitize_tool_call_id(value: Any, fallback_name: str = "tool") -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_-]", "_", str(value or ""))[:64]
+    return cleaned or f"{fallback_name}_call"
 
 
-def _envelope_labels(runtime_model: str, *, model_enum: str | None = None, step: int = 2) -> dict[str, str]:
+def _append_turn(contents: list[dict[str, Any]], role: str, parts: list[dict[str, Any]]) -> None:
+    if not parts:
+        return
+    if contents and contents[-1].get("role") == role:
+        contents[-1].setdefault("parts", []).extend(parts)
+    else:
+        contents.append({"role": role, "parts": parts})
+
+
+def _stable_uuid(seed: str) -> str:
+    raw = bytearray(hashlib.sha1(seed.encode("utf-8")).digest()[:16])
+    raw[6] = (raw[6] & 0x0F) | 0x50
+    raw[8] = (raw[8] & 0x3F) | 0x80
+    hexed = raw.hex()
+    return f"{hexed[:8]}-{hexed[8:12]}-{hexed[12:16]}-{hexed[16:20]}-{hexed[20:]}"
+
+
+def _envelope(
+    messages: list[dict[str, Any]],
+    contents: list[dict[str, Any]],
+    runtime_model: str,
+    model_enum: str | None,
+) -> tuple[str, str, dict[str, str]]:
+    first = messages[0] if messages and isinstance(messages[0], dict) else {}
+    seed = (
+        f"{first.get('role') or 'user'}:"
+        f"{first.get('timestamp') or ''}:"
+        f"{_content_text(first.get('content'))[:64]}"
+    )
+    conversation_id = _stable_uuid(f"antigravity:conv:{seed}")
+    trajectory_id = _stable_uuid(f"antigravity:traj:{seed}")
+    step = max(1, len(contents))
+    request_index = sum(1 for m in messages if isinstance(m, dict) and m.get("role") == "assistant")
+    raw_session = secrets.randbits(64)
+    if raw_session >= 1 << 63:
+        raw_session -= 1 << 64
+    session_id = str(raw_session)
+
+    is_claude = runtime_model.startswith("claude-")
+    is_non_gemini = is_claude or not runtime_model.startswith("gemini-")
     labels = {
-        "last_step_index": str(step - 1),
-        "trajectory_id": str(uuid.uuid4()),
-        "used_claude": str(runtime_model.startswith("claude-")).lower(),
-        "used_claude_conservative": str(runtime_model.startswith("claude-")).lower(),
+        "last_step_index": str(max(0, len(contents) - 1)),
+        "request_id": f"{trajectory_id}-{request_index}",
+        "trajectory_id": trajectory_id,
+        "used_claude": str(is_claude).lower(),
+        "used_claude_conservative": str(is_claude).lower(),
+        "used_non_gemini_model": str(is_non_gemini).lower(),
     }
-    resolved = model_enum or get_model_enum(runtime_model)
-    if resolved:
-        labels["model_enum"] = resolved
-    return labels
+    resolved_enum = model_enum or get_model_enum(runtime_model)
+    if resolved_enum:
+        labels["model_enum"] = resolved_enum
+
+    request_id = (
+        f"agent/{conversation_id}/{int(time.time() * 1000)}/{trajectory_id}/{step}"
+    )
+    return request_id, session_id, labels
 
 
 def build_generate_content_request(
@@ -219,6 +355,8 @@ def build_generate_content_request(
     system_parts: list[dict[str, str]] = []
     contents: list[dict[str, Any]] = []
     call_names: dict[str, str] = {}
+    dropped_tool_calls: dict[str, tuple[str, str]] = {}
+    requires_signature = _gemini_requires_thought_signature(runtime_model)
 
     for message in messages:
         if not isinstance(message, dict):
@@ -231,19 +369,17 @@ def build_generate_content_request(
             continue
 
         if role == "user":
-            parts = _parts_from_content(message.get("content"))
-            if parts:
-                contents.append({"role": "user", "parts": parts})
+            _append_turn(contents, "user", _parts_from_content(message.get("content")))
             continue
 
         if role == "assistant":
             parts: list[dict[str, Any]] = []
             reasoning = message.get("reasoning_content")
             if isinstance(reasoning, str) and reasoning.strip():
-                thought_part: dict[str, Any] = {"thought": True, "text": reasoning}
-                sig = message.get("reasoning_signature") or message.get("thoughtSignature")
-                if isinstance(sig, str) and sig:
-                    thought_part["thoughtSignature"] = sig
+                signature = message.get("reasoning_signature") or message.get("thoughtSignature")
+                thought_part: dict[str, Any] = {"thought": True, "text": _sanitize_text(reasoning)}
+                if _valid_thought_signature(signature):
+                    thought_part["thoughtSignature"] = signature
                 parts.append(thought_part)
             parts.extend(_parts_from_content(message.get("content")))
 
@@ -254,52 +390,100 @@ def build_generate_content_request(
                 name = fn.get("name") if isinstance(fn, dict) else None
                 if not name:
                     continue
-                call_id = tool_call.get("id")
+                args = _parse_args(fn.get("arguments") if isinstance(fn, dict) else None)
+                call_id = str(tool_call.get("id") or "")
                 if call_id:
-                    call_names[str(call_id)] = str(name)
+                    call_names[call_id] = str(name)
+
+                signature = _tool_call_signature(tool_call)
+                if requires_signature and not signature:
+                    args_text = json.dumps(args, separators=(",", ":"), ensure_ascii=False)
+                    key = call_id or f"empty:{name}"
+                    dropped_tool_calls[key] = (str(name), args_text)
+                    if call_id:
+                        dropped_tool_calls[_sanitize_tool_call_id(call_id, str(name))] = (str(name), args_text)
+                    continue
+
                 call: dict[str, Any] = {
                     "functionCall": {
                         "name": name,
-                        "args": _parse_args(fn.get("arguments") if isinstance(fn, dict) else None),
+                        "args": args,
                     }
                 }
                 if runtime_model.startswith("claude-") or runtime_model.startswith("gpt-oss-"):
-                    if call_id:
-                        call["functionCall"]["id"] = str(call_id)
-                signature = _tool_call_signature(tool_call)
+                    call["functionCall"]["id"] = _sanitize_tool_call_id(call_id, str(name))
                 if signature:
                     call["thoughtSignature"] = signature
-                elif _requires_thought_signature(runtime_model):
-                    call["thoughtSignature"] = SKIP_THOUGHT_SIGNATURE
                 parts.append(call)
 
-            if parts:
-                contents.append({"role": "model", "parts": parts})
+            _append_turn(contents, "model", parts)
             continue
 
         if role in {"tool", "function"}:
-            name = message.get("name") or call_names.get(str(message.get("tool_call_id") or "")) or "tool"
+            call_id = str(message.get("tool_call_id") or "")
+            name = str(message.get("name") or call_names.get(call_id) or "tool")
+            response_text = _content_text(message.get("content"))
+            dropped = dropped_tool_calls.get(call_id)
+            if dropped is None and call_id:
+                dropped = dropped_tool_calls.get(_sanitize_tool_call_id(call_id, name))
+            if dropped is not None:
+                dropped_name, args_text = dropped
+                label = f"`{dropped_name}`" if args_text == "{}" else f"`{dropped_name}` ({args_text})"
+                _append_turn(
+                    contents,
+                    "user",
+                    [{"text": _sanitize_text(f"[Observation from {label}:\n{response_text}]")}],
+                )
+                continue
+
             response: dict[str, Any] = {
-                "name": str(name),
-                "response": {"output": _content_text(message.get("content"))},
+                "name": name,
+                "response": {"output": response_text},
             }
-            call_id = message.get("tool_call_id")
             if call_id and (runtime_model.startswith("claude-") or runtime_model.startswith("gpt-oss-")):
-                response["id"] = str(call_id)
-            part = {"functionResponse": response}
-            if (
-                contents
-                and contents[-1].get("role") == "user"
-                and any("functionResponse" in p for p in contents[-1].get("parts", []))
-            ):
-                contents[-1]["parts"].append(part)
-            else:
-                contents.append({"role": "user", "parts": [part]})
+                response["id"] = _sanitize_tool_call_id(call_id, name)
+            _append_turn(contents, "user", [{"functionResponse": response}])
+
+    # Compaction may leave a function-call model turn without the user boundary
+    # required by Antigravity. Restore it before sending the request.
+    index = 0
+    while index < len(contents):
+        turn = contents[index]
+        has_call = (
+            turn.get("role") == "model"
+            and any("functionCall" in p for p in turn.get("parts", []))
+        )
+        if has_call and (index == 0 or contents[index - 1].get("role") != "user"):
+            contents.insert(index, {"role": "user", "parts": [{"text": CONTINUATION_TEXT}]})
+            index += 1
+        index += 1
+
+    has_user_text = any(
+        turn.get("role") == "user"
+        and any(isinstance(p.get("text"), str) and p["text"].strip() for p in turn.get("parts", []))
+        for turn in contents
+    )
+    if not has_user_text and contents:
+        user_turn = next((turn for turn in contents if turn.get("role") == "user"), None)
+        if user_turn is None:
+            contents.insert(0, {"role": "user", "parts": [{"text": CONTINUATION_TEXT}]})
+        else:
+            user_turn.setdefault("parts", []).append({"text": CONTINUATION_TEXT})
 
     if not contents:
-        contents.append({"role": "user", "parts": [{"text": "Continue the active task."}]})
+        contents.append({"role": "user", "parts": [{"text": "Apply the active system instructions."}]})
     elif contents[-1].get("role") == "model":
-        contents.append({"role": "user", "parts": [{"text": "Continue the active task using the available context."}]})
+        if any("functionCall" in p for p in contents[-1].get("parts", [])):
+            raise ValueError(
+                "Antigravity request is missing tool result(s) for the final assistant tool call."
+            )
+        _append_turn(contents, "user", [{"text": CONTINUATION_TEXT}])
+
+    if not system_parts:
+        system_parts = [
+            {"text": ANTIGRAVITY_SYSTEM_INSTRUCTION},
+            {"text": ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION},
+        ]
 
     cap = get_max_output_tokens(logical_model, runtime_model)
     generation_config: dict[str, Any] = {
@@ -313,15 +497,20 @@ def build_generate_content_request(
     if top_p is not None:
         generation_config["topP"] = top_p
 
+    request_id, session_id, labels = _envelope(
+        messages,
+        contents,
+        runtime_model,
+        model_enum_override,
+    )
     request: dict[str, Any] = {
         "contents": contents,
+        "systemInstruction": {"role": "user", "parts": system_parts},
         "generationConfig": generation_config,
-        "sessionId": _session_id(messages),
-        "labels": _envelope_labels(runtime_model, model_enum=model_enum_override),
+        "sessionId": session_id,
+        "labels": labels,
     }
-    if system_parts:
-        request["systemInstruction"] = {"role": "system", "parts": system_parts}
-    converted_tools = _tools(tools or [])
+    converted_tools = _tools(tools or [], runtime_model)
     if converted_tools:
         request["tools"] = converted_tools
     tool_config = _tool_config(tools or [], tool_choice, runtime_model)
@@ -334,5 +523,5 @@ def build_generate_content_request(
         "request": request,
         "requestType": "agent",
         "userAgent": "antigravity",
-        "requestId": f"agent/{uuid.uuid4()}/{int(time.time() * 1000)}/{uuid.uuid4()}/2",
+        "requestId": request_id,
     }

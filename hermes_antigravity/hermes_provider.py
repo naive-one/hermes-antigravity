@@ -95,6 +95,7 @@ def register_provider_profile() -> bool:
             fallback_models=tuple(KNOWN_MODELS),
             default_aux_model=DEFAULT_MODEL,
             fixed_temperature=OMIT_TEMPERATURE,
+            native_reasoning_details_type="antigravity.native_assistant",
         )
     )
     return True

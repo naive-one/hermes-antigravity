@@ -330,11 +330,16 @@ def ensure_provider_profile_files(root: Path | None = None) -> Path:
 
     plugin_dir = Path(root).expanduser() / "plugins" / "model-providers" / "antigravity"
     plugin_dir.mkdir(parents=True, exist_ok=True)
-    (plugin_dir / "__init__.py").write_text(
+    source_root = Path(__file__).resolve().parent.parent
+    shim = (
+        "import sys\n"
+        f"_SOURCE_ROOT = {str(source_root)!r}\n"
+        "if _SOURCE_ROOT not in sys.path:\n"
+        "    sys.path.insert(0, _SOURCE_ROOT)\n"
         "from hermes_antigravity.hermes_provider import register_provider_profile\n"
-        "register_provider_profile()\n",
-        encoding="utf-8",
+        "register_provider_profile()\n"
     )
+    (plugin_dir / "__init__.py").write_text(shim, encoding="utf-8")
     (plugin_dir / "plugin.yaml").write_text(
         "name: antigravity\n"
         "kind: model-provider\n"

@@ -6,6 +6,7 @@ import platform
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
 from .errors import AntigravityError
@@ -176,22 +177,29 @@ def fetch_available_models(
     headers = request_headers(access_token)
     body = {"project": project_id}
 
-    for endpoint in MODEL_ENDPOINTS:
-        try:
-            if post_json is None:
-                payload = _post_json(
-                    f"{endpoint}/v1internal:fetchAvailableModels",
-                    body,
-                    headers,
-                    timeout=DISCOVERY_TIMEOUT_SECONDS,
-                )
-            else:
-                payload = post_json(f"{endpoint}/v1internal:fetchAvailableModels", body, headers)
-        except Exception:
-            continue
-        models = payload.get("models") if isinstance(payload, dict) else None
-        if isinstance(models, dict):
-            merged.update(models)
+    def fetch_one(endpoint: str) -> dict[str, Any]:
+        if post_json is None:
+            return _post_json(
+                f"{endpoint}/v1internal:fetchAvailableModels",
+                body,
+                headers,
+                timeout=DISCOVERY_TIMEOUT_SECONDS,
+            )
+        return post_json(f"{endpoint}/v1internal:fetchAvailableModels", body, headers)
+
+    # pi-antigravity merges the account catalog across endpoint candidates.
+    # Probe them concurrently so a slow sandbox endpoint does not add its
+    # timeout serially to every catalog refresh.
+    with ThreadPoolExecutor(max_workers=len(MODEL_ENDPOINTS)) as pool:
+        futures = [pool.submit(fetch_one, endpoint) for endpoint in MODEL_ENDPOINTS]
+        for future in as_completed(futures):
+            try:
+                payload = future.result()
+            except Exception:
+                continue
+            models = payload.get("models") if isinstance(payload, dict) else None
+            if isinstance(models, dict):
+                merged.update(models)
 
     if merged:
         register_discovered_model_enums(merged)

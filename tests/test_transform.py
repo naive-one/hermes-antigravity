@@ -132,6 +132,50 @@ class TransformTests(unittest.TestCase):
         self.assertEqual(query_schema["type"], "object")
         self.assertEqual(query_schema["properties"]["q"]["type"], "string")
 
+    def test_native_reasoning_carrier_replays_text_and_thinking_signatures(self):
+        body = build_generate_content_request(
+            model="google-antigravity/gemini-3.8-flash",
+            project_id="p",
+            messages=[
+                {"role": "user", "content": "first"},
+                {
+                    "role": "assistant",
+                    "content": "answer",
+                    "reasoning_content": "thinking",
+                    "reasoning_details": [
+                        {
+                            "type": "antigravity.native_assistant",
+                            "parts": [
+                                {
+                                    "kind": "thinking",
+                                    "text": "thinking",
+                                    "thoughtSignature": "abcdabcd",
+                                },
+                                {
+                                    "kind": "text",
+                                    "text": "answer",
+                                    "thoughtSignature": "efghefgh",
+                                },
+                            ],
+                        }
+                    ],
+                },
+                {"role": "user", "content": "continue"},
+            ],
+            reasoning_effort="high",
+        )
+        model_turn = next(
+            turn for turn in body["request"]["contents"] if turn["role"] == "model"
+        )
+        thinking = next(part for part in model_turn["parts"] if part.get("thought"))
+        answer = next(
+            part
+            for part in model_turn["parts"]
+            if part.get("text") == "answer" and not part.get("thought")
+        )
+        self.assertEqual(thinking["thoughtSignature"], "abcdabcd")
+        self.assertEqual(answer["thoughtSignature"], "efghefgh")
+
     def test_request_uses_model_enum(self):
         body = build_generate_content_request(
             model="google-antigravity/gemini-3.8-flash",

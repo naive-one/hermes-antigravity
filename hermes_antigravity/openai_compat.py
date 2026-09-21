@@ -132,10 +132,24 @@ def to_openai_completion(model: str, upstream: dict[str, Any]) -> dict[str, Any]
             reasoning.append(value)
             if isinstance(signature, str) and signature:
                 reasoning_signatures.append(signature)
+                native_signed_parts.append(
+                    {
+                        "kind": "thinking",
+                        "text": value,
+                        "thoughtSignature": signature,
+                    }
+                )
         else:
             text.append(value)
             if isinstance(signature, str) and signature:
                 text_signatures.append(signature)
+                native_signed_parts.append(
+                    {
+                        "kind": "text",
+                        "text": value,
+                        "thoughtSignature": signature,
+                    }
+                )
 
     message: dict[str, Any] = {
         "role": "assistant",

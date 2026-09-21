@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
@@ -128,35 +129,110 @@ def read_default_tier(allowed_tiers: object) -> str:
     return TIER_LEGACY
 
 
+def stable_project_id(seed: str = "antigravity-default") -> str:
+    digest = bytearray(hashlib.sha1(f"antigravity:{seed}".encode("utf-8")).digest()[:16])
+    digest[6] = (digest[6] & 0x0F) | 0x50
+    digest[8] = (digest[8] & 0x3F) | 0x80
+    hexed = digest.hex()
+    return f"{hexed[:8]}-{hexed[8:12]}-{hexed[12:16]}-{hexed[16:20]}-{hexed[20:]}"
+
+
+def default_project_id(seed: str = "antigravity-default") -> str:
+    return (os.getenv("ANTIGRAVITY_PROJECT_ID") or "").strip() or stable_project_id(seed)
+
+
+def _list_cloud_projects(access_token: str) -> str | None:
+    headers = request_headers(access_token)
+    for endpoint in MODEL_ENDPOINTS:
+        try:
+            payload = _post_json(
+                f"{endpoint}/v1internal:listCloudAICompanionProjects",
+                {},
+                headers,
+                timeout=DISCOVERY_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            continue
+        project = extract_project_id(payload)
+        if project:
+            return project
+    return None
+
+
 def load_or_onboard_project(
     access_token: str,
     *,
+    seed: str = "antigravity-default",
     post_json: Callable[[str, dict[str, Any], dict[str, str]], dict[str, Any]] | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> str:
-    sender = post_json or (lambda url, body, headers: _post_json(url, body, headers))
-    headers = request_headers(access_token)
-    load_payload = sender(
-        f"{CLOUD_CODE_ENDPOINT}/v1internal:loadCodeAssist",
-        {"metadata": ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA},
-        headers,
-    )
-    existing = extract_project_id(load_payload)
-    if existing:
-        return existing
+    explicit = (os.getenv("ANTIGRAVITY_PROJECT_ID") or "").strip()
+    if explicit:
+        return explicit
 
-    onboard_body = {
-        "tierId": read_default_tier(load_payload.get("allowedTiers") if isinstance(load_payload, dict) else None),
-        "metadata": ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA,
-    }
-    for attempt in range(PROJECT_ONBOARD_MAX_ATTEMPTS):
-        if attempt:
-            sleep(PROJECT_ONBOARD_INTERVAL_SECONDS)
-        op = sender(f"{CLOUD_CODE_ENDPOINT}/v1internal:onboardUser", onboard_body, headers)
-        project_id = extract_project_id((op.get("response") or {}) if isinstance(op, dict) else None)
-        if isinstance(op, dict) and op.get("done") and project_id:
-            return project_id
-    raise AntigravityError("onboardUser did not return a project id", status=502)
+    sender = post_json
+    headers = request_headers(access_token)
+    load_payload: dict[str, Any] | None = None
+
+    # Match pi-antigravity: production first, then sandbox/cloudcode fallback,
+    # with short metadata timeouts.
+    for endpoint in MODEL_ENDPOINTS:
+        try:
+            if sender is None:
+                payload = _post_json(
+                    f"{endpoint}/v1internal:loadCodeAssist",
+                    {"metadata": {"ideType": "ANTIGRAVITY"}},
+                    headers,
+                    timeout=DISCOVERY_TIMEOUT_SECONDS,
+                )
+            else:
+                payload = sender(
+                    f"{endpoint}/v1internal:loadCodeAssist",
+                    {"metadata": {"ideType": "ANTIGRAVITY"}},
+                    headers,
+                )
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            load_payload = payload
+            project = extract_project_id(payload)
+            if project:
+                return project
+            if sender is None:
+                listed = _list_cloud_projects(access_token)
+                if listed:
+                    return listed
+            break
+
+    # Keep the legacy onboarding route as an additional compatibility path.
+    if isinstance(load_payload, dict):
+        onboard_body = {
+            "tierId": read_default_tier(load_payload.get("allowedTiers")),
+            "metadata": ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA,
+        }
+        for endpoint in MODEL_ENDPOINTS:
+            for attempt in range(PROJECT_ONBOARD_MAX_ATTEMPTS):
+                if attempt:
+                    sleep(PROJECT_ONBOARD_INTERVAL_SECONDS)
+                try:
+                    if sender is None:
+                        op = _post_json(
+                            f"{endpoint}/v1internal:onboardUser",
+                            onboard_body,
+                            headers,
+                            timeout=DISCOVERY_TIMEOUT_SECONDS,
+                        )
+                    else:
+                        op = sender(f"{endpoint}/v1internal:onboardUser", onboard_body, headers)
+                except Exception:
+                    break
+                project = extract_project_id((op.get("response") or {}) if isinstance(op, dict) else None)
+                if isinstance(op, dict) and op.get("done") and project:
+                    return project
+
+    # pi-antigravity deliberately has a deterministic final fallback so a
+    # transient project-discovery outage does not block inference entirely.
+    return default_project_id(seed)
 
 
 def fetch_available_models(

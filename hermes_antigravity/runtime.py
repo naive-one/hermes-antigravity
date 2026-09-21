@@ -151,7 +151,12 @@ def _runtime_candidates(
     dynamic_runtime = _catalog_runtime(catalog, request.model, request.reasoning_effort)
 
     candidates: list[str] = []
-    for runtime_id in (static_runtime, dynamic_runtime):
+    ordered_initial = (
+        (static_runtime, dynamic_runtime)
+        if request.model in KNOWN_MODELS
+        else (dynamic_runtime, static_runtime)
+    )
+    for runtime_id in ordered_initial:
         if runtime_id and runtime_id not in candidates:
             candidates.append(runtime_id)
 

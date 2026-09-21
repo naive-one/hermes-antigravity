@@ -1,0 +1,25 @@
+name: Hermes Python CI
+
+on:
+  push:
+    branches: [main, hermes-port]
+  pull_request:
+    branches: [main]
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package
+        run: python -m pip install -e .
+      - name: Compile
+        run: python -m compileall -q hermes_antigravity tests
+      - name: Unit tests
+        run: python -m unittest discover -v

@@ -26,6 +26,7 @@ ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION = (
     "Output only the final response."
 )
 CONTINUATION_TEXT = "Continue the active task using the available instructions and context."
+NATIVE_REASONING_DETAILS_TYPE = "antigravity.native_assistant"
 _BASE64_SIGNATURE_PATTERN = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 
 
@@ -273,6 +274,25 @@ def _tool_call_signature(tool_call: dict[str, Any]) -> str | None:
     return None
 
 
+def _native_signature_map(message: dict[str, Any]) -> dict[tuple[str, str], str]:
+    out: dict[tuple[str, str], str] = {}
+    details = message.get("reasoning_details")
+    if not isinstance(details, list):
+        return out
+    for detail in details:
+        if not isinstance(detail, dict) or detail.get("type") != NATIVE_REASONING_DETAILS_TYPE:
+            continue
+        for part in detail.get("parts") or []:
+            if not isinstance(part, dict):
+                continue
+            kind = str(part.get("kind") or "")
+            text = part.get("text")
+            signature = part.get("thoughtSignature")
+            if kind in {"text", "thinking"} and isinstance(text, str) and _valid_thought_signature(signature):
+                out[(kind, text)] = signature
+    return out
+
+
 def _sanitize_tool_call_id(value: Any, fallback_name: str = "tool") -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_-]", "_", str(value or ""))[:64]
     return cleaned or f"{fallback_name}_call"
@@ -374,14 +394,29 @@ def build_generate_content_request(
 
         if role == "assistant":
             parts: list[dict[str, Any]] = []
-            reasoning = message.get("reasoning_content")
+            native_signatures = _native_signature_map(message)
+            reasoning = message.get("reasoning_content") or message.get("reasoning")
             if isinstance(reasoning, str) and reasoning.strip():
-                signature = message.get("reasoning_signature") or message.get("thoughtSignature")
+                signature = (
+                    message.get("reasoning_signature")
+                    or message.get("thoughtSignature")
+                    or native_signatures.get(("thinking", reasoning))
+                )
                 thought_part: dict[str, Any] = {"thought": True, "text": _sanitize_text(reasoning)}
                 if _valid_thought_signature(signature):
                     thought_part["thoughtSignature"] = signature
                 parts.append(thought_part)
-            parts.extend(_parts_from_content(message.get("content")))
+
+            content_parts = _parts_from_content(message.get("content"))
+            for part in content_parts:
+                text_value = part.get("text")
+                if (
+                    isinstance(text_value, str)
+                    and "thoughtSignature" not in part
+                    and _valid_thought_signature(native_signatures.get(("text", text_value)))
+                ):
+                    part["thoughtSignature"] = native_signatures[("text", text_value)]
+            parts.extend(content_parts)
 
             for tool_call in message.get("tool_calls") or []:
                 if not isinstance(tool_call, dict):

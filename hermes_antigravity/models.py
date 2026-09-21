@@ -151,7 +151,9 @@ def normalize_model_id(model: str) -> str:
 
 
 def normalize_effort(value: str | None) -> str:
-    effort = (value or "low").strip().lower().replace("_", "-")
+    if value is None or not str(value).strip():
+        return "off"
+    effort = str(value).strip().lower().replace("_", "-")
     if effort in {"off", "none", "disabled"}:
         return "off"
     if effort in {"minimum", "minimal"}:

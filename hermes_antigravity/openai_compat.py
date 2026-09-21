@@ -10,6 +10,8 @@ from typing import Any
 
 from .models import normalize_model_id
 
+NATIVE_REASONING_DETAILS_TYPE = "antigravity.native_assistant"
+
 
 @dataclass
 class ChatRequest:
@@ -96,6 +98,7 @@ def to_openai_completion(model: str, upstream: dict[str, Any]) -> dict[str, Any]
     tool_calls: list[dict[str, Any]] = []
     text_signatures: list[str] = []
     reasoning_signatures: list[str] = []
+    native_signed_parts: list[dict[str, Any]] = []
 
     for part in parts:
         if not isinstance(part, dict):
@@ -146,6 +149,13 @@ def to_openai_completion(model: str, upstream: dict[str, Any]) -> dict[str, Any]
         message["text_signature"] = text_signatures[-1]
     if tool_calls:
         message["tool_calls"] = tool_calls
+    if native_signed_parts:
+        message["reasoning_details"] = [
+            {
+                "type": NATIVE_REASONING_DETAILS_TYPE,
+                "parts": native_signed_parts,
+            }
+        ]
 
     return {
         "id": "chatcmpl-" + uuid.uuid4().hex,

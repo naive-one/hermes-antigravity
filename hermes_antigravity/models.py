@@ -232,25 +232,46 @@ def public_model_from_runtime(runtime_id: str) -> str | None:
     }
     if rid in aliases:
         return aliases[rid]
-    for suffix in ("-extra-low", "-extra-high", "-minimal", "-medium", "-high", "-low", "-thinking", "-tiered"):
+
+    for suffix in (
+        "-extra-low",
+        "-extra-high",
+        "-minimal",
+        "-medium",
+        "-high",
+        "-low",
+        "-thinking",
+        "-tiered",
+    ):
         if rid.endswith(suffix):
             base = rid[:-len(suffix)]
-            if f"{ANTIGRAVITY_PREFIX}{base}" in KNOWN_MODELS:
+            if base.startswith("gemini-") or base.startswith("claude-") or base.startswith("gpt-oss-"):
                 return base
-    if f"{ANTIGRAVITY_PREFIX}{rid}" in KNOWN_MODELS:
+
+    if rid.startswith("gemini-") or rid.startswith("claude-") or rid.startswith("gpt-oss-"):
         return rid
     return None
 
 
 def public_models_from_catalog(models: dict[str, Any] | None) -> list[str]:
-    if not isinstance(models, dict):
-        return list(KNOWN_MODELS)
+    dynamic: list[str] = []
     seen: set[str] = set()
-    for runtime_id in models:
-        public = public_model_from_runtime(str(runtime_id))
-        if public:
-            seen.add(f"{ANTIGRAVITY_PREFIX}{public}")
-    # Conservative fallbacks remain selectable even when a rollout-specific
-    # authenticated catalog omits a family.
-    seen.update(KNOWN_MODELS)
-    return [model for model in KNOWN_MODELS if model in seen]
+
+    if isinstance(models, dict):
+        for runtime_id in models:
+            public = public_model_from_runtime(str(runtime_id))
+            if not public:
+                continue
+            model = f"{ANTIGRAVITY_PREFIX}{public}"
+            if model not in seen:
+                seen.add(model)
+                dynamic.append(model)
+
+    # Keep known, tested families first. New account-visible families are then
+    # appended automatically, matching pi-antigravity's discovery-first model.
+    ordered = list(KNOWN_MODELS)
+    for model in dynamic:
+        if model not in ordered:
+            ordered.append(model)
+    return ordered
+

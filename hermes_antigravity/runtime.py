@@ -22,15 +22,6 @@ from .oauth import fetch_user_email, refresh_access_token
 from .openai_compat import ChatRequest, openai_completion_object, parse_chat_request, to_openai_completion
 from .transform import build_generate_content_request
 
-_QUOTA_MARKERS = (
-    "quota",
-    "individual quota reached",
-    "daily limit",
-    "resource exhausted",
-    "rate limit",
-)
-
-
 def _is_hard_quota_error(exc: AntigravityError) -> bool:
     if exc.status != 429:
         return False
@@ -60,7 +51,7 @@ def _generate_with_transient_retry(
     last_error: AntigravityError | None = None
     for attempt in range(3):
         try:
-            return _generate_with_transient_retry(client, access_token=access_token, body=body)
+            return client.generate(access_token=access_token, body=body)
         except AntigravityError as exc:
             last_error = exc
             if exc.status != 429 or _is_hard_quota_error(exc) or attempt >= 2:

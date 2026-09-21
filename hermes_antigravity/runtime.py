@@ -67,7 +67,10 @@ def _prepare_credentials(
         if email:
             creds["email"] = email
     if not (creds.get("project_id") or creds.get("projectId")):
-        creds["project_id"] = load_or_onboard_project(str(access))
+        creds["project_id"] = load_or_onboard_project(
+            str(access),
+            seed=str(creds.get("email") or "antigravity-default"),
+        )
 
     if persist:
         store.upsert(creds, activate=False)

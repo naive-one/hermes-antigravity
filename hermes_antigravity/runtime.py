@@ -77,13 +77,8 @@ def _credential_candidates(store: CredentialStore) -> list[tuple[str, dict[str, 
     candidates: list[tuple[str, dict[str, Any], bool]] = []
     seen_tokens: set[str] = set()
 
-    keychain = load_agy_keychain_credentials()
-    if keychain:
-        token = str(keychain.get("refresh_token") or keychain.get("access_token") or "")
-        if token:
-            seen_tokens.add(token)
-        candidates.append(("agy-keychain", keychain, False))
-
+    # The profile-local active account must win. Keychain is a compatibility
+    # fallback, otherwise "hermes agy use" would be ignored on macOS.
     for key, creds in store.ordered_credentials():
         token = str(creds.get("refresh_token") or creds.get("access_token") or "")
         if token and token in seen_tokens:
@@ -91,6 +86,12 @@ def _credential_candidates(store: CredentialStore) -> list[tuple[str, dict[str, 
         if token:
             seen_tokens.add(token)
         candidates.append((key, creds, True))
+
+    keychain = load_agy_keychain_credentials()
+    if keychain:
+        token = str(keychain.get("refresh_token") or keychain.get("access_token") or "")
+        if not token or token not in seen_tokens:
+            candidates.append(("agy-keychain", keychain, False))
 
     return candidates
 

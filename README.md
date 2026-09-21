@@ -1,211 +1,246 @@
-# pi-antigravity
+# hermes-antigravity
 
-[![npm version](https://img.shields.io/npm/v/pi-antigravity?logo=npm)](https://www.npmjs.com/package/pi-antigravity)
-[![npm downloads](https://img.shields.io/npm/dm/pi-antigravity?logo=npm)](https://www.npmjs.com/package/pi-antigravity)
-[![license](https://img.shields.io/npm/l/pi-antigravity)](LICENSE)
-[![Sponsor](https://img.shields.io/badge/Sponsor-GitHub-ea4aaa?logo=github)](https://github.com/sponsors/Rahularya01)
+Google Antigravity / Cloud Code Assist provider for **Hermes Agent**.
 
-**pi-antigravity** is a [Pi Coding Agent](https://pi.dev) provider that lets Pi talk directly to Google Antigravity / Cloud Code Assist models — Gemini, plus the Claude and GPT-OSS models Antigravity also advertises. Sign in with Google, pick a model, and go. Under the hood it handles OAuth login, native streaming, model routing, and quota diagnostics itself, so it never shells out to an external Antigravity CLI.
+This repository is a Hermes-native port of
+[pi-antigravity](https://github.com/Rahularya01/pi-antigravity). The original
+TypeScript implementation under `src/` is kept as an upstream reference and
+regression target. Hermes itself runs the Python implementation under
+`hermes_antigravity/`; Pi, Node, and Yarn are **not required at runtime**.
 
-Using [OpenCode](https://opencode.ai) instead of Pi? Install the companion plugin [`@rahularya01/opencode-antigravity`](https://www.npmjs.com/package/@rahularya01/opencode-antigravity).
+> [!CAUTION]
+> This is an unofficial integration and is not endorsed by Google. It uses
+> Antigravity access outside Google's documented client surface. Accounts may
+> be restricted or lose access. Use a separate account if that risk matters.
 
-Want to equip Pi with MCP, web access, subagents, and todos? Install [`pi-essentials`](https://github.com/Rahularya01/pi-essentials) (currently in beta), an all-in-one companion extension designed for Pi.
+## What is preserved from pi-antigravity
 
-> **Unofficial integration.** This project is not affiliated with or endorsed by Google. Use it only with an account and services you are authorized to access, and review its source before granting OAuth permissions.
+The Hermes port keeps the protocol behavior that matters for long-running
+agents:
 
-## Contents
-
-- [Requirements](#requirements)
-- [Install](#install)
-- [Quick start](#quick-start)
-- [Authentication and credential safety](#authentication-and-credential-safety)
-- [Commands](#commands)
-- [Models and routing](#models-and-routing)
-- [Configuration](#configuration)
-- [Troubleshooting](#troubleshooting)
-- [Development](#development)
-
-## Requirements
-
-- Pi Coding Agent and Pi AI version **0.80.0 or later**
-- A Google account that can use the relevant Cloud Code Assist / Antigravity services
-- A browser to complete the Google sign-in. Same-machine is best (the browser hits the local callback automatically); on a remote/headless machine, complete sign-in anywhere and paste the resulting callback URL back into Pi (see [Troubleshooting](#troubleshooting)).
+- authenticated `fetchAvailableModels` model discovery;
+- automatic grouping of runtime thinking variants into public model families;
+- Gemini 3.8 / 3.7 / 3.6 / 3.5 Flash routing;
+- Gemini 3.1 Pro, Claude 4.6, and GPT-OSS routing;
+- `model_enum` discovery with static fallbacks;
+- Gemini thinking budgets and Hermes reasoning-level mapping;
+- Gemini thought-signature preservation for tool-call history;
+- runtime fallback: Gemini 3.8 → 3.7 → 3.6 on model-not-found responses;
+- endpoint failover across Antigravity production/sandbox endpoints;
+- OAuth refresh;
+- multiple Google accounts with automatic failover on hard quota/429 errors;
+- Cloud Code project discovery/onboarding;
+- quota probing;
+- image data URLs and OpenAI/Hermes tool schemas.
 
 ## Install
 
-Install from npm:
-
 ```bash
-pi install npm:pi-antigravity
+hermes plugins install naive-one/hermes-antigravity --enable
 ```
 
-Or install the latest repository version:
+Restart a running Hermes/Desktop session after the first install so both the
+general plugin and generated model-provider shim are discovered.
+
+## Login
+
+On a desktop machine:
 
 ```bash
-pi install git:github.com/Rahularya01/pi-antigravity
+hermes agy login
 ```
 
-Restart Pi (or run `/reload`) after installation. To update the npm package later, use `pi update npm:pi-antigravity`.
+On a VPS/headless server, the most reliable flow is:
 
-## Quick start
+```bash
+hermes agy login --manual --no-browser
+```
 
-1. Start Pi and run `/login antigravity`.
-2. Complete Google sign-in in your browser.
-3. Select a model, for example:
+Open the printed Google authorization URL on your local computer. Google will
+eventually redirect the browser to a localhost URL that may fail to load because
+Hermes is running on the VPS. Copy that **entire callback URL** from the browser
+address bar and paste it into the VPS prompt.
 
-   ```text
-   /model antigravity/gemini-3.8-flash
-   ```
+The OAuth request includes the current Antigravity `aicode` scope.
 
-4. Start working. If a request fails, run `/antigravity.doctor` for sanitized diagnostics.
+## Select a model
 
-To link another account without losing the existing one, run `/login antigravity`
-again and complete Google sign-in with the other account. Manage linked accounts with:
+```bash
+hermes agy select gemini-3.8-flash
+```
+
+Bare model names are normalized automatically, so the command above stores:
 
 ```text
-/antigravity.accounts
-/antigravity.accounts switch <index|email>
-/antigravity.accounts remove <index|email>
+google-antigravity/gemini-3.8-flash
 ```
 
-On a hard quota wall (HTTP 429 with a reset hint), the provider automatically tries the next linked account.
+You can also use Hermes' normal model picker after the provider is installed.
 
-## Authentication and credential safety
+Current conservative fallback catalog:
 
-The provider uses the OAuth 2.0 Authorization Code flow with PKCE, so credentials are only ever exchanged with Google — never typed into Pi.
+```text
+google-antigravity/gemini-3.8-flash
+google-antigravity/gemini-3.7-flash
+google-antigravity/gemini-3.6-flash
+google-antigravity/gemini-3.5-flash
+google-antigravity/gemini-3.1-pro
+google-antigravity/claude-sonnet-4-6
+google-antigravity/claude-opus-4-6
+google-antigravity/gpt-oss-120b
+```
 
-1. `/login antigravity` opens Google sign-in and starts a temporary callback listener at `http://localhost:51121/oauth-callback`.
-2. After you approve access, Pi exchanges the callback code for tokens and stores the provider credentials in Pi's auth store (normally `~/.pi/agent/auth.json`).
-3. Pi refreshes access tokens automatically when they expire — you shouldn't need to sign in again unless a token is revoked.
-4. Successful logins and token rotations are also kept in `~/.pi/agent/antigravity-accounts.json` with owner-only permissions so linked accounts can be switched without re-authenticating.
+The authenticated catalog is also inspected at runtime. Newly exposed Gemini,
+Claude, or GPT-OSS families can therefore appear without waiting for the static
+fallback table to be updated.
 
-The callback listener binds only to a loopback host, so it isn't reachable from outside your machine. The auth and account files it writes to contain sensitive access and refresh tokens: **do not commit them, paste them into issues, or share their contents.**
+## Reasoning
 
-Signing in requests these Google OAuth scopes:
+Hermes reasoning levels are mapped to the runtime variants currently used by
+Antigravity.
 
-<!-- prettier-ignore -->
-| Scope | Why it's needed |
-| --- | --- |
-| `aicode` | Access to the Cloud Code Assist / Antigravity model catalog and endpoints |
-| `cloud-platform` | General Cloud Code Assist API access |
-| `userinfo.email`, `userinfo.profile` | Identify the signed-in Google account |
-| `cclog` | Cloud Code Assist logging/telemetry endpoints used by the API |
-| `experimentsandconfigs` | Server-side experiment and config flags for the API |
+| Public model | Hermes reasoning | Runtime behavior |
+| --- | --- | --- |
+| Gemini 3.8/3.7/3.6 Flash | off | low runtime, thoughts disabled |
+| Gemini 3.8/3.7/3.6 Flash | low | low runtime, budget 1000 |
+| Gemini 3.8/3.7/3.6 Flash | medium | medium runtime, budget 4000 |
+| Gemini 3.8/3.7/3.6 Flash | high | high runtime, dynamic budget -1 |
+| Gemini 3.5 Flash | low / medium / high | extra-low / low / agent runtime |
+| Gemini 3.1 Pro | low / high | low / agent runtime |
+| Claude 4.6 | high | thinking-enabled runtime |
+| GPT-OSS 120B | medium | medium runtime |
 
-Review these permissions before approving access. If your credentials expire or are revoked, just re-run `/login antigravity` to sign in again.
+If Hermes does not explicitly enable reasoning, the provider keeps thoughts
+disabled rather than silently spending thinking tokens.
 
 ## Commands
 
-<!-- prettier-ignore -->
-| Command | Description |
-| --- | --- |
-| `/login antigravity` | Sign in to Google and configure the provider. |
-| `/model antigravity/<model-id>` | Choose a registered Antigravity model. |
-| `/antigravity.usage` | Show the server-reported shared quota groups and reset times. |
-| `/antigravity.models` | List available runtime models, remaining shared-pool quota, and capabilities. |
-| `/antigravity.accounts` | List linked accounts; use `switch` or `remove` with an index or email to manage them. |
-| `/antigravity.models all` | Include tab/chat models normally hidden from the model list. |
-| `/antigravity.refresh` | Force refresh the dynamic model catalog from Antigravity. |
-| `/antigravity.doctor` | Show sanitized provider diagnostics, including the endpoint, status, and resolved runtime model. |
-| `/antigravity.image <prompt>` | Generate an image via Antigravity and save it under `.pi/generated-images/`. Optional `--ratio 16:9`, `--model`, `--path`. |
-
-Model availability, entitlement, quota groups, and resets are returned by the service and can differ by account. The quota percentage shown for a model can represent a shared pool, not a private per-model allowance.
-
-The extension also registers a `generate_image` tool the model can call. Images are written inside the project directory (default `.pi/generated-images/`). Image models such as `gemini-3-pro-image` are account-dependent; `/antigravity.image` falls back to other advertised Gemini image IDs on 404.
-
-## Models and routing
-
-After you sign in, the provider refreshes its catalog from Antigravity (`fetchAvailableModels`) and groups runtime thinking variants into public Pi model IDs. Newly enabled models — for example a new Gemini Flash generation — become selectable after that refresh without waiting for an extension release. A last-known-good cache is kept for offline/cold start; the static table below is only the conservative fallback and a routing reference.
-
-Use `/antigravity.models` to see live availability and quota for your account. Runtime names such as `gemini-3.8-flash-low` / `-medium` / `-high` collapse to `gemini-3.8-flash` with those thinking levels. The conservative static entries remain selectable when an account's authenticated catalog omits them.
-
-### Why Claude and GPT-OSS appear
-
-Antigravity / Cloud Code Assist exposes a multi-provider catalog. Depending on your account, its Google-authenticated API can advertise Google Gemini models alongside Claude models served through Anthropic Vertex and GPT-OSS served through OpenAI Vertex. This extension intentionally exposes those advertised Claude and GPT-OSS models through the single `antigravity` provider; they are not separate Pi providers and do not use a separate Anthropic or OpenAI login.
-
-The backend's display labels do not always match its runtime IDs. For example, `gemini-3.5-flash-extra-low`, `gemini-3.5-flash-low`, and `gemini-3-flash-agent` can be displayed as Gemini 3.5 Flash Low, Medium, and High. All supported models send integer `thinkingBudget` (Gemini 3.8/3.7/3.6: -1/4000/1000/0, Gemini 3.5: 10000/4000/1000/0, Gemini 3.1 Pro: 10001/1001/0, Claude: 1024/0, GPT-OSS: 8192/0) matching the official Antigravity CLI wire format.
-
-<!-- prettier-ignore -->
-| Public model ID | Input | Thinking levels shown | Max output tokens | Request routing |
-| --- | --- | --- | --- | --- |
-| `gemini-3.8-flash` | Text, image | Low, Medium, High | 65,536 | low → `gemini-3.8-flash-low`; medium → `gemini-3.8-flash-medium`; high → `gemini-3.8-flash-high` |
-| `gemini-3.7-flash` | Text, image | Low, Medium, High | 65,536 | low → `gemini-3.7-flash-low`; medium → `gemini-3.7-flash-medium`; high → `gemini-3.7-flash-high` |
-| `gemini-3.6-flash` | Text, image | Low, Medium, High | 65,536 | low → `gemini-3.6-flash-low`; medium → `gemini-3.6-flash-medium`; high → `gemini-3.6-flash-high` |
-| `gemini-3.5-flash` | Text, image | Low, Medium, High | 65,536 | low → `gemini-3.5-flash-extra-low`; medium → `gemini-3.5-flash-low`; high → `gemini-3-flash-agent` |
-| `gemini-3.1-pro` | Text, image | Low, High | 65,535 | low → `gemini-3.1-pro-low`; high → `gemini-pro-agent` |
-| `claude-sonnet-4-6` | Text, image | High | 64,000 | high → `claude-sonnet-4-6` |
-| `claude-opus-4-6` | Text, image | High | 64,000 | high → `claude-opus-4-6-thinking` |
-| `gpt-oss-120b` | Text | Medium | 32,768 | medium → `gpt-oss-120b-medium` |
-
-To limit which models Pi cycles through, enable specific entries in `~/.pi/agent/settings.json`:
-
-```json
-{
-  "models": {
-    "antigravity/gemini-3.8-flash": { "enabled": true },
-    "antigravity/gemini-3.7-flash": { "enabled": true },
-    "antigravity/gemini-3.6-flash": { "enabled": true },
-    "antigravity/gemini-3.5-flash": { "enabled": true },
-    "antigravity/gemini-3.1-pro": { "enabled": true },
-    "antigravity/claude-sonnet-4-6": { "enabled": true }
-  }
-}
+```bash
+hermes agy status
+hermes agy accounts
+hermes agy use <account-or-email>
+hermes agy remove-account <account>
+hermes agy models
+hermes agy models --refresh
+hermes agy quota
+hermes agy select <model>
+hermes agy logout
 ```
 
-## Configuration
+### Multiple accounts
 
-All primary environment variables start with `ANTIGRAVITY_`. The legacy `NOAGY_` prefix is also accepted for compatibility.
+Each Hermes profile stores its own account pool in:
 
-<!-- prettier-ignore -->
-| Variable | Purpose |
-| --- | --- |
-| `ANTIGRAVITY_BASE_URL` | Override the API base URL. It must be HTTPS, contain no URL credentials, and target an allowed Google APIs host. |
-| `ANTIGRAVITY_PROJECT_ID` | Use a specific Cloud Code Assist project ID instead of discovery or the stable account fallback. |
-| `ANTIGRAVITY_CALLBACK_HOST` | Bind OAuth callback to `127.0.0.1`, `::1`, or `localhost` only. Defaults to `127.0.0.1`. |
-| `ANTIGRAVITY_USER_AGENT` | Override the request user-agent. |
-| `ANTIGRAVITY_RUNTIME_MODEL` | Pin requests to a runtime model ID, bypassing discovered/fallback routing. |
-| `ANTIGRAVITY_CATALOG_REFRESH_INTERVAL_MS` | Override catalog refresh TTL in ms. Defaults to 4 hours (`14400000`). Set to `0` to always refresh. |
-| `ANTIGRAVITY_CLIENT_ID` | Use a custom Google OAuth client ID. |
-| `ANTIGRAVITY_CLIENT_SECRET` | Use a custom Google OAuth client secret. Keep it out of source control and shell history. |
-| `ANTIGRAVITY_NO_KEEPALIVE` | Set to `1` to skip the keep-alive connection pool. |
-| `ANTIGRAVITY_NO_PREWARM` | Set to `1` to skip the TLS pre-warm request made on the first Antigravity request. |
+```text
+$HERMES_HOME/.antigravity_accounts.json
+```
 
-By default, the provider tries `https://daily-cloudcode-pa.googleapis.com`, then the sandbox host, then `https://cloudcode-pa.googleapis.com`. Prefer the built-in OAuth client unless you have a reason to use your own credentials.
+The file is written with owner-only permissions where the OS supports them.
 
-### Latency
+Run `hermes agy login --no-keychain` repeatedly to add accounts. The active
+account is tried first. When Antigravity returns a hard quota wall (for example
+HTTP 429), the current request can continue with the next stored account.
 
-Provider requests reuse a keep-alive connection pool when the runtime supports it, so consecutive turns do not repeat the DNS, TCP, and TLS handshake. When `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` is set, that pool is skipped so Pi's proxy-aware dispatcher is used instead. The connection is opened on the first Antigravity request rather than at Pi startup, so other extensions are not stalled by an unauthenticated handshake. For the lowest time-to-first-token, pick a fast runtime: `gemini-3.8-flash` with reasoning off routes to `gemini-3.8-flash-low` at thinking level `LOW`. Setting `ANTIGRAVITY_PROJECT_ID` also removes the project-discovery round-trip when credentials do not already carry a project ID.
+Existing single-account `$HERMES_HOME/.antigravity_oauth.json` credentials are
+migrated automatically.
 
-## Troubleshooting
+On macOS, an existing `agy` Keychain login can be reused unless
+`--no-keychain` is supplied.
 
-- **No credentials / 401 / 403:** Run `/login antigravity` again, then check `/antigravity.doctor`.
-- **Remote/headless machine — browser can't reach `localhost:51121`:** The callback binds to loopback only, so a browser on another machine can't hit it. You have two options:
-  - **Paste (no extra setup):** Run `/login antigravity`, open the shown URL and complete Google sign-in in _any_ browser. When it redirects to `http://localhost:51121/oauth-callback?…` and fails to load, copy that full URL from the address bar and paste it into the prompt Pi shows. The code is single-use and expires quickly, so paste promptly.
-  - **SSH tunnel (reusable):** From the machine with the browser, run `ssh -N -L 51121:127.0.0.1:51121 <user>@<server>` and keep it open, then run `/login antigravity` on the server. The redirect to `localhost:51121` tunnels through to the local callback automatically.
-- **OAuth callback will not start:** Ensure port `51121` is free and `ANTIGRAVITY_CALLBACK_HOST` is a permitted loopback address.
-- **Model is unavailable:** Run `/antigravity.models`; availability is account- and service-dependent.
-- **Claude/GPT tool-call schema error:** Upgrade to the latest package release. The provider adapts Pi's JSON Schema tool definitions for the Cloud Code Assist custom-tool bridge.
-- **Quota or rate limit:** Run `/antigravity.usage`. A `429` response usually indicates quota or rate limiting; changing models may still draw from the same shared pool.
-- **Need a safe diagnostic:** `/antigravity.doctor` redacts recognized secrets from its error output. Still review output before sharing it publicly.
+## Model discovery and fallback
+
+For a request such as Gemini 3.8 Flash High, the port behaves approximately as:
+
+```text
+Hermes
+  ↓
+gemini-3.8-flash-high
+  ↓ 404 / unavailable
+gemini-3.7-flash-high
+  ↓ 404 / unavailable
+gemini-3.6-flash-high
+```
+
+Before inference, `fetchAvailableModels` is queried and cached. Live
+`model_enum` values override static fallback enums.
+
+Model discovery failure does not block inference; the conservative routing table
+is still usable.
+
+## Streaming status
+
+The Antigravity transport itself consumes Google's SSE stream, including
+thinking/tool-call parts, but **v1 currently aggregates those events into one
+OpenAI-shaped completion before returning control to Hermes**. In other words,
+protocol streaming is used internally, but Hermes does not yet receive native
+incremental text/thinking deltas from this port.
+
+This does not change model quality, tool calling, fallback, or token accounting;
+it mainly affects time-to-visible-first-token and live thinking display. A
+future version can move this integration to Hermes' provider-specific
+`create_client()` transport hook to expose native streaming without changing
+the Antigravity protocol modules.
+
+## Architecture
+
+```text
+Hermes Agent
+   │
+   ├─ ProviderProfile
+   ├─ llm_execution middleware
+   └─ hermes agy CLI
+          │
+          ▼
+hermes_antigravity/
+   ├─ credentials.py   account pool
+   ├─ oauth.py         Google OAuth / refresh
+   ├─ cloudcode.py     project, catalog, quota
+   ├─ models.py        model grouping and routing
+   ├─ transform.py     Hermes/OpenAI → Antigravity wire
+   ├─ client.py        SSE + endpoint failover
+   ├─ runtime.py       model/account recovery
+   └─ openai_compat.py Antigravity → Hermes response
+          │
+          ▼
+Google Antigravity / Cloud Code Assist
+```
+
+The original TypeScript `src/` remains in the fork so upstream
+`pi-antigravity` changes can be compared and ported without reverse
+engineering the protocol again.
 
 ## Development
 
-This repo uses [Yarn 4](https://yarnpkg.com/) via Corepack for install, scripts, and CI. The published extension itself runs on Node (Pi's CLI).
+Python port:
 
 ```bash
-corepack enable
-yarn install
-yarn check
+python -m pip install -e .
+python -m compileall -q hermes_antigravity tests
+python -m unittest discover -v
 ```
 
-Installs are hardened against common supply-chain attacks: lifecycle scripts are off, lockfile checksums must match the npm registry, and package versions younger than three days are rejected. Do not add a second registry or enable `enableScripts` without a review.
+The repository also retains upstream TypeScript tests as a protocol-reference
+regression suite.
 
-The package declares its Pi extension in `package.json` under `pi.extensions`. See the [Pi package documentation](https://pi.dev/docs/latest/packages) for package installation, manifest, and gallery conventions.
+## Environment overrides
 
-## Support the project
+```bash
+ANTIGRAVITY_USER_AGENT=...
+ANTIGRAVITY_CLI_VERSION=...
+ANTIGRAVITY_CLIENT_CL=...
+ANTIGRAVITY_OAUTH_PORT=51121
+ANTIGRAVITY_OAUTH_BIND_HOST=127.0.0.1
+ANTIGRAVITY_OAUTH_REDIRECT_HOST=localhost
+```
 
-If `pi-antigravity` is useful to you, consider [sponsoring the project on GitHub](https://github.com/sponsors/Rahularya01).
+Normally none of these need to be set.
 
-## License
+## Upstream
 
-[MIT](LICENSE)
+Protocol/reference implementation:
+
+- https://github.com/Rahularya01/pi-antigravity
+
+Hermes Agent:
+
+- https://github.com/NousResearch/hermes-agent

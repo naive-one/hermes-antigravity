@@ -1,0 +1,14 @@
+[project]
+name = "hermes-antigravity"
+version = "1.0.0"
+description = "Google Antigravity / Cloud Code Assist provider plugin for Hermes Agent"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["hermes_antigravity*"]

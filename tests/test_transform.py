@@ -9,6 +9,11 @@ class TransformTests(unittest.TestCase):
         self.assertEqual(thinking_config("gemini-3.8-flash-medium", "medium")["thinkingBudget"], 4000)
         self.assertEqual(thinking_config("gemini-3.8-flash-high", "high")["thinkingBudget"], -1)
 
+    def test_unspecified_reasoning_keeps_thoughts_off(self):
+        config = thinking_config("gemini-3.8-flash-low", None)
+        self.assertEqual(config["thinkingBudget"], 0)
+        self.assertFalse(config["includeThoughts"])
+
     def test_off_disables_thoughts(self):
         config = thinking_config("gemini-3.8-flash-low", "off")
         self.assertEqual(config["thinkingBudget"], 0)

@@ -180,7 +180,14 @@ def _namespace(value: Any) -> Any:
         # ToolCall.provider_data and replayed on the next turn.
         return SimpleNamespace(
             **{
-                key: item if key == "extra_content" and isinstance(item, dict) else _namespace(item)
+                key: (
+                    item
+                    if (
+                        (key == "extra_content" and isinstance(item, dict))
+                        or (key == "reasoning_details" and isinstance(item, list))
+                    )
+                    else _namespace(item)
+                )
                 for key, item in value.items()
             }
         )

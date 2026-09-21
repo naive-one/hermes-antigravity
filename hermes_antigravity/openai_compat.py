@@ -165,7 +165,15 @@ def to_openai_completion(model: str, upstream: dict[str, Any]) -> dict[str, Any]
 
 def _namespace(value: Any) -> Any:
     if isinstance(value, dict):
-        return SimpleNamespace(**{key: _namespace(item) for key, item in value.items()})
+        # Hermes' ChatCompletionsTransport expects tool_call.extra_content to
+        # remain a plain dict so Gemini thought_signature can be persisted in
+        # ToolCall.provider_data and replayed on the next turn.
+        return SimpleNamespace(
+            **{
+                key: item if key == "extra_content" and isinstance(item, dict) else _namespace(item)
+                for key, item in value.items()
+            }
+        )
     if isinstance(value, list):
         return [_namespace(item) for item in value]
     return value

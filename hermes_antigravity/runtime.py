@@ -31,9 +31,44 @@ _QUOTA_MARKERS = (
 )
 
 
-def _is_quota_error(exc: AntigravityError) -> bool:
+def _is_hard_quota_error(exc: AntigravityError) -> bool:
+    if exc.status != 429:
+        return False
     text = str(exc).lower()
-    return exc.status == 429 or (exc.status == 403 and any(marker in text for marker in _QUOTA_MARKERS))
+    if "individual quota reached" in text or "resets in " in text or "reset in " in text:
+        return True
+    if "rate limit" in text or "rate-limit" in text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "quota exceeded",
+            "exceeded your",
+            "daily limit",
+            "limit reached",
+            "reached your",
+        )
+    )
+
+
+def _generate_with_transient_retry(
+    client: AntigravityClient,
+    *,
+    access_token: str,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    last_error: AntigravityError | None = None
+    for attempt in range(3):
+        try:
+            return _generate_with_transient_retry(client, access_token=access_token, body=body)
+        except AntigravityError as exc:
+            last_error = exc
+            if exc.status != 429 or _is_hard_quota_error(exc) or attempt >= 2:
+                raise
+            time.sleep(0.5 * (2 ** attempt))
+    if last_error:
+        raise last_error
+    raise AntigravityError("Antigravity request failed without a response", status=502)
 
 
 def _needs_refresh(credentials: dict[str, Any]) -> bool:
@@ -278,7 +313,7 @@ def generate_chat_completion(
                 runtime_model=runtime_model,
             )
             try:
-                upstream = client.generate(access_token=access_token, body=body)
+                upstream = _generate_with_transient_retry(client, access_token=access_token, body=body)
                 if persist:
                     store.upsert(credentials, activate=True)
                 return to_openai_completion(request.model, upstream)
@@ -298,7 +333,7 @@ def generate_chat_completion(
                     runtime_model=runtime_model,
                 )
                 try:
-                    upstream = client.generate(access_token=access_token, body=body)
+                    upstream = _generate_with_transient_retry(client, access_token=access_token, body=body)
                     return to_openai_completion(request.model, upstream)
                 except Exception as retry_exc:
                     last_error = retry_exc
@@ -306,7 +341,7 @@ def generate_chat_completion(
                         if runtime_index >= len(runtimes):
                             append_dynamic_runtime_if_needed()
                         continue
-                    if isinstance(retry_exc, AntigravityError) and _is_quota_error(retry_exc):
+                    if isinstance(retry_exc, AntigravityError) and _is_hard_quota_error(retry_exc):
                         break
                     raise
             except AntigravityError as exc:
@@ -318,7 +353,7 @@ def generate_chat_completion(
                     if runtime_index >= len(runtimes):
                         append_dynamic_runtime_if_needed()
                     continue
-                if _is_quota_error(exc):
+                if _is_hard_quota_error(exc):
                     break
                 raise
 

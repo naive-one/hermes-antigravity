@@ -32,7 +32,7 @@ class TransformTests(unittest.TestCase):
                         {
                             "id": "call_1",
                             "type": "function",
-                            "thought_signature": "signed-value",
+                            "thought_signature": "abcdabcd",
                             "function": {"name": "read_file", "arguments": "{\"path\":\"a\"}"},
                         }
                     ],
@@ -43,7 +43,94 @@ class TransformTests(unittest.TestCase):
         )
         model_parts = body["request"]["contents"][1]["parts"]
         call = next(p for p in model_parts if "functionCall" in p)
-        self.assertEqual(call["thoughtSignature"], "signed-value")
+        self.assertEqual(call["thoughtSignature"], "abcdabcd")
+
+    def test_unsigned_gemini_tool_history_becomes_observation(self):
+        body = build_generate_content_request(
+            model="google-antigravity/gemini-3.8-flash",
+            project_id="p",
+            messages=[
+                {"role": "user", "content": "run it"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": "{\"path\":\"a\"}"},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_2", "content": "file text"},
+            ],
+            reasoning_effort="high",
+        )
+        contents = body["request"]["contents"]
+        self.assertFalse(
+            any(
+                "functionCall" in part
+                for turn in contents
+                for part in turn.get("parts", [])
+            )
+        )
+        joined = "\n".join(
+            part.get("text", "")
+            for turn in contents
+            for part in turn.get("parts", [])
+        )
+        self.assertIn("Observation from", joined)
+        self.assertIn("file text", joined)
+
+    def test_wire_envelope_matches_antigravity_shape(self):
+        body = build_generate_content_request(
+            model="google-antigravity/gemini-3.8-flash",
+            project_id="p",
+            messages=[
+                {"role": "system", "content": "system rule"},
+                {"role": "user", "content": "ping"},
+            ],
+        )
+        request = body["request"]
+        self.assertEqual(request["systemInstruction"]["role"], "user")
+        self.assertEqual(request["labels"]["last_step_index"], "0")
+        self.assertIn("request_id", request["labels"])
+        self.assertIn("trajectory_id", request["labels"])
+        self.assertEqual(request["labels"]["used_non_gemini_model"], "false")
+        self.assertTrue(body["requestId"].startswith("agent/"))
+
+    def test_gemini_tools_use_parameters_json_schema_and_dereference_local_refs(self):
+        body = build_generate_content_request(
+            model="google-antigravity/gemini-3.8-flash",
+            project_id="p",
+            messages=[{"role": "user", "content": "ping"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "description": "lookup",
+                        "parameters": {
+                            "type": "object",
+                            "$defs": {
+                                "Query": {
+                                    "type": "object",
+                                    "properties": {"q": {"type": "string"}},
+                                    "required": ["q"],
+                                }
+                            },
+                            "properties": {"query": {"$ref": "#/$defs/Query"}},
+                        },
+                    },
+                }
+            ],
+        )
+        declaration = body["request"]["tools"][0]["functionDeclarations"][0]
+        self.assertIn("parametersJsonSchema", declaration)
+        self.assertNotIn("parameters", declaration)
+        query_schema = declaration["parametersJsonSchema"]["properties"]["query"]
+        self.assertEqual(query_schema["type"], "object")
+        self.assertEqual(query_schema["properties"]["q"]["type"], "string")
 
     def test_request_uses_model_enum(self):
         body = build_generate_content_request(

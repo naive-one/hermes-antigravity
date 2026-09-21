@@ -92,6 +92,99 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result["choices"][0]["message"]["content"], "ok")
         self.assertEqual(client.calls[0][1], "gemini-3.8-flash-high")
         self.assertEqual(client.calls[1][1], "gemini-3.7-flash-high")
+        _catalog.assert_not_called()
+
+    @patch("hermes_antigravity.runtime.load_agy_keychain_credentials", return_value={})
+    @patch(
+        "hermes_antigravity.runtime.fetch_available_models",
+        return_value={
+            "gemini-3.8-flash-tiered": {
+                "model": "MODEL_DYNAMIC_38",
+                "displayName": "Gemini 3.8 Flash (High)",
+            }
+        },
+    )
+    def test_live_discovery_runs_after_static_404_chain(self, catalog, _keychain):
+        class TieredClient:
+            def __init__(self):
+                self.calls = []
+
+            def generate(self, *, access_token, body):
+                self.calls.append(body["model"])
+                if body["model"] != "gemini-3.8-flash-tiered":
+                    raise AntigravityError("model not found", status=404)
+                return {
+                    "candidates": [
+                        {
+                            "content": {"role": "model", "parts": [{"text": "dynamic ok"}]},
+                            "finishReason": "STOP",
+                        }
+                    ],
+                    "usageMetadata": {},
+                }
+
+        client = TieredClient()
+        result = generate_chat_completion(
+            {
+                "model": "google-antigravity/gemini-3.8-flash",
+                "messages": [{"role": "user", "content": "ping"}],
+                "reasoning_effort": "high",
+            },
+            client=client,
+            store=FakeStore(),
+        )
+        self.assertEqual(result["choices"][0]["message"]["content"], "dynamic ok")
+        self.assertEqual(
+            client.calls[:3],
+            [
+                "gemini-3.8-flash-high",
+                "gemini-3.7-flash-high",
+                "gemini-3.6-flash-high",
+            ],
+        )
+        self.assertEqual(client.calls[3], "gemini-3.8-flash-tiered")
+        catalog.assert_called_once()
+
+    @patch("hermes_antigravity.runtime.load_agy_keychain_credentials", return_value={})
+    @patch(
+        "hermes_antigravity.runtime.fetch_available_models",
+        return_value={
+            "gemini-3.9-flash-high": {
+                "model": "MODEL_DYNAMIC_39",
+                "displayName": "Gemini 3.9 Flash (High)",
+            }
+        },
+    )
+    def test_future_model_uses_discovered_runtime_first(self, catalog, _keychain):
+        class FutureClient:
+            def __init__(self):
+                self.calls = []
+
+            def generate(self, *, access_token, body):
+                self.calls.append(body["model"])
+                return {
+                    "candidates": [
+                        {
+                            "content": {"role": "model", "parts": [{"text": "future ok"}]},
+                            "finishReason": "STOP",
+                        }
+                    ],
+                    "usageMetadata": {},
+                }
+
+        client = FutureClient()
+        result = generate_chat_completion(
+            {
+                "model": "google-antigravity/gemini-3.9-flash",
+                "messages": [{"role": "user", "content": "ping"}],
+                "reasoning_effort": "high",
+            },
+            client=client,
+            store=FakeStore(),
+        )
+        self.assertEqual(result["choices"][0]["message"]["content"], "future ok")
+        self.assertEqual(client.calls[0], "gemini-3.9-flash-high")
+        catalog.assert_called_once()
 
     @patch("hermes_antigravity.runtime.load_agy_keychain_credentials", return_value={})
     @patch("hermes_antigravity.runtime.fetch_available_models", return_value={})

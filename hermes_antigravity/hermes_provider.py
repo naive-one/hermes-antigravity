@@ -6,6 +6,7 @@ from .models import (
     DEFAULT_MODEL,
     KNOWN_MODELS,
     clamp_reasoning_effort,
+    get_max_output_tokens,
     strip_provider_prefix,
 )
 from .runtime import get_available_model_ids
@@ -29,13 +30,13 @@ def _reasoning_effort(reasoning_config: dict | None, model: str | None = None) -
 
 def _efforts_for(model: str | None) -> tuple[str, ...] | None:
     logical = strip_provider_prefix(model or DEFAULT_MODEL)
-    if logical in {"gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"}:
+    if logical.startswith("gemini-") and "flash" in logical:
         return ("low", "medium", "high")
     if logical == "gemini-3.1-pro":
         return ("low", "high")
-    if logical in {"claude-sonnet-4-6", "claude-opus-4-6"}:
+    if logical.startswith("claude-"):
         return ("high",)
-    if logical == "gpt-oss-120b":
+    if logical.startswith("gpt-oss-"):
         return ("medium",)
     return None
 
@@ -62,7 +63,7 @@ def register_provider_profile() -> bool:
             return {}, top_level
 
         def get_max_tokens(self, model: str | None) -> int | None:
-            return KNOWN_MODELS.get(model or "") or KNOWN_MODELS.get(DEFAULT_MODEL)
+            return get_max_output_tokens(model or DEFAULT_MODEL)
 
         def supported_reasoning_efforts(self, model: str | None) -> tuple[str, ...] | None:
             return _efforts_for(model)

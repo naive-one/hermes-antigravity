@@ -10,6 +10,7 @@ from .credentials import CredentialStore, load_agy_keychain_credentials
 from .errors import AntigravityError, TokenExpired
 from .models import (
     DEFAULT_MODEL,
+    KNOWN_MODELS,
     get_fallback_runtime_model,
     get_model_enum,
     normalize_effort,
@@ -226,15 +227,26 @@ def generate_chat_completion(
 
         access_token = _access_token(credentials)
         project_id = _project_id(credentials)
-        try:
-            catalog = fetch_available_models(access_token, project_id)
-        except Exception:
-            catalog = {}
+        is_known_model = request.model in KNOWN_MODELS
+        catalog: dict[str, Any] = {}
+        discovery_attempted = False
+
+        # Known models use their verified static route immediately for lower
+        # time-to-first-token. Unknown/future models need discovery up front.
+        if not is_known_model:
+            discovery_attempted = True
+            try:
+                catalog = fetch_available_models(access_token, project_id)
+            except Exception:
+                catalog = {}
 
         runtimes = _runtime_candidates(request, catalog)
         refreshed_once = False
+        runtime_index = 0
 
-        for runtime_model in runtimes:
+        while runtime_index < len(runtimes):
+            runtime_model = runtimes[runtime_index]
+            runtime_index += 1
             body = build_upstream_body(
                 request,
                 credentials=credentials,
@@ -273,6 +285,22 @@ def generate_chat_completion(
             except AntigravityError as exc:
                 last_error = exc
                 if exc.status == 404:
+                    # Known routes intentionally skip discovery on the fast
+                    # path. Only after static candidates fail do we ask the
+                    # account catalog for rollout aliases/tiered runtimes.
+                    if runtime_index >= len(runtimes) and not discovery_attempted:
+                        discovery_attempted = True
+                        try:
+                            catalog = fetch_available_models(access_token, project_id)
+                        except Exception:
+                            catalog = {}
+                        dynamic_runtime = _catalog_runtime(
+                            catalog,
+                            request.model,
+                            request.reasoning_effort,
+                        )
+                        if dynamic_runtime and dynamic_runtime not in runtimes:
+                            runtimes.append(dynamic_runtime)
                     continue
                 if _is_quota_error(exc):
                     break

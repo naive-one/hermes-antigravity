@@ -247,6 +247,23 @@ def generate_chat_completion(
         refreshed_once = False
         runtime_index = 0
 
+        def append_dynamic_runtime_if_needed() -> None:
+            nonlocal catalog, discovery_attempted
+            if discovery_attempted:
+                return
+            discovery_attempted = True
+            try:
+                catalog = fetch_available_models(access_token, project_id)
+            except Exception:
+                catalog = {}
+            dynamic_runtime = _catalog_runtime(
+                catalog,
+                request.model,
+                request.reasoning_effort,
+            )
+            if dynamic_runtime and dynamic_runtime not in runtimes:
+                runtimes.append(dynamic_runtime)
+
         while runtime_index < len(runtimes):
             runtime_model = runtimes[runtime_index]
             runtime_index += 1
@@ -281,6 +298,8 @@ def generate_chat_completion(
                 except Exception as retry_exc:
                     last_error = retry_exc
                     if isinstance(retry_exc, AntigravityError) and retry_exc.status == 404:
+                        if runtime_index >= len(runtimes):
+                            append_dynamic_runtime_if_needed()
                         continue
                     if isinstance(retry_exc, AntigravityError) and _is_quota_error(retry_exc):
                         break
@@ -291,19 +310,8 @@ def generate_chat_completion(
                     # Known routes intentionally skip discovery on the fast
                     # path. Only after static candidates fail do we ask the
                     # account catalog for rollout aliases/tiered runtimes.
-                    if runtime_index >= len(runtimes) and not discovery_attempted:
-                        discovery_attempted = True
-                        try:
-                            catalog = fetch_available_models(access_token, project_id)
-                        except Exception:
-                            catalog = {}
-                        dynamic_runtime = _catalog_runtime(
-                            catalog,
-                            request.model,
-                            request.reasoning_effort,
-                        )
-                        if dynamic_runtime and dynamic_runtime not in runtimes:
-                            runtimes.append(dynamic_runtime)
+                    if runtime_index >= len(runtimes):
+                        append_dynamic_runtime_if_needed()
                     continue
                 if _is_quota_error(exc):
                     break

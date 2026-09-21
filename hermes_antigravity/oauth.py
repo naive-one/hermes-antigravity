@@ -247,7 +247,10 @@ def _complete_credentials(credentials: dict[str, Any]) -> dict[str, Any]:
     email = fetch_user_email(str(credentials["access_token"]))
     if email:
         credentials["email"] = email
-    credentials["project_id"] = load_or_onboard_project(str(credentials["access_token"]))
+    credentials["project_id"] = load_or_onboard_project(
+        str(credentials["access_token"]),
+        seed=email or "antigravity-default",
+    )
     return credentials
 
 

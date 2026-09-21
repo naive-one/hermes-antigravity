@@ -22,4 +22,4 @@ jobs:
       - name: Compile
         run: python -m compileall -q hermes_antigravity tests
       - name: Unit tests
-        run: python -m unittest discover -v
+        run: python -m unittest discover -s tests -v

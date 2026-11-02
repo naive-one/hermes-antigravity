@@ -4,6 +4,18 @@ from hermes_antigravity.transform import build_generate_content_request, thinkin
 
 
 class TransformTests(unittest.TestCase):
+    def test_argon_uses_levels_not_token_budgets(self):
+        for effort, level in [(None, "MEDIUM"), ("off", "LOW"), ("low", "LOW"), ("medium", "MEDIUM"), ("high", "HIGH")]:
+            with self.subTest(effort=effort):
+                body = build_generate_content_request(
+                    model="gemini-4-argon", project_id="p",
+                    messages=[{"role": "user", "content": "ping"}], reasoning_effort=effort,
+                )
+                config = body["request"]["generationConfig"]["thinkingConfig"]
+                self.assertEqual(config.get("thinkingLevel"), level)
+                self.assertNotIn("thinkingBudget", config)
+        self.assertEqual(thinking_config("gemini-4-argon-high", None)["thinkingLevel"], "HIGH")
+
     def test_gemini_38_thinking_budgets(self):
         self.assertEqual(thinking_config("gemini-3.8-flash-low", "low")["thinkingBudget"], 1000)
         self.assertEqual(thinking_config("gemini-3.8-flash-medium", "medium")["thinkingBudget"], 4000)

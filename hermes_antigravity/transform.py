@@ -9,6 +9,7 @@ from copy import deepcopy
 from typing import Any
 
 from .models import (
+    clamp_reasoning_effort,
     get_max_output_tokens,
     get_model_enum,
     normalize_effort,
@@ -32,6 +33,10 @@ _BASE64_SIGNATURE_PATTERN = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 
 def thinking_config(runtime_model: str, effort: str | None) -> dict[str, Any] | None:
     level = normalize_effort(effort)
+    if runtime_model == "gemini-4-argon" or runtime_model.startswith("gemini-4-argon-"):
+        suffix = runtime_model.rsplit("-", 1)[-1]
+        argon_level = suffix if suffix in {"low", "medium", "high"} else clamp_reasoning_effort("gemini-4-argon", effort)
+        return {"includeThoughts": level != "off", "thinkingLevel": argon_level.upper()}
     if runtime_model.startswith("claude-"):
         return {
             "includeThoughts": level != "off",

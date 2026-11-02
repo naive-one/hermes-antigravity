@@ -46,7 +46,8 @@ def antigravity_user_agent() -> str:
     if legacy_version:
         return f"antigravity/hub/{legacy_version} {os_name}/{arch}"
 
-    cli_version = (os.getenv("ANTIGRAVITY_CLI_VERSION") or "1.1.23").strip()
+    # Catalog visibility is version-sensitive; 1.4.3 includes Argon discovery.
+    cli_version = (os.getenv("ANTIGRAVITY_CLI_VERSION") or "1.4.3").strip()
     client_cl = (os.getenv("ANTIGRAVITY_CLIENT_CL") or "974125021").strip()
     return (
         f"antigravity/cli/{cli_version} "

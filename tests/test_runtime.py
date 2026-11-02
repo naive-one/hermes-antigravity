@@ -60,6 +60,77 @@ class QuotaClient:
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_explicit_disabled_id_is_rejected_without_credentials(self):
+        with patch("hermes_antigravity.runtime._credential_candidates") as candidates:
+            with self.assertRaises(AntigravityError) as raised:
+                generate_chat_completion({"model": "gemini-4-argon-disabled", "messages": []})
+        self.assertEqual(raised.exception.status, 403)
+        candidates.assert_not_called()
+
+    @patch("hermes_antigravity.runtime.load_agy_keychain_credentials", return_value={})
+    @patch("hermes_antigravity.runtime.fetch_available_models", return_value={
+        "gemini-4-argon-disabled": {"disabled": True, "tagDescription": "Paid plan required"},
+    })
+    def test_disabled_family_fails_before_inference_or_account_rotation(self, catalog, _keychain):
+        client = FallbackClient()
+        with self.assertRaises(AntigravityError) as raised:
+            generate_chat_completion({
+                "model": "google-antigravity/gemini-4-argon",
+                "messages": [{"role": "user", "content": "ping"}],
+            }, client=client, store=FakeStore())
+        self.assertEqual(raised.exception.status, 403)
+        self.assertIn("Paid plan required", str(raised.exception))
+        self.assertEqual(client.calls, [])
+        catalog.assert_called_once()
+
+    @patch("hermes_antigravity.runtime.load_agy_keychain_credentials", return_value={})
+    @patch("hermes_antigravity.runtime.fetch_available_models", return_value={
+        "gemini-3.8-flash-high": {"disabled": True, "tagDescription": "Model access denied"},
+    })
+    def test_disabled_known_model_fails_before_inference_or_account_rotation(self, catalog, _keychain):
+        client = QuotaClient()
+        store = FakeStore()
+        with self.assertRaises(AntigravityError) as raised:
+            generate_chat_completion({
+                "model": "google-antigravity/gemini-3.8-flash",
+                "messages": [{"role": "user", "content": "ping"}],
+                "reasoning_effort": "high",
+            }, client=client, store=store)
+        self.assertEqual(raised.exception.status, 403)
+        self.assertIn("Model access denied", str(raised.exception))
+        self.assertEqual(client.calls, [])
+        catalog.assert_called_once_with("tok-a", "p")
+        self.assertEqual([(creds["email"], active) for creds, active in store.saved], [
+            ("a@example.com", False),
+        ])
+
+    @patch("hermes_antigravity.runtime.load_agy_keychain_credentials", return_value={})
+    @patch("hermes_antigravity.runtime.fetch_available_models", return_value={
+        "gemini-3.8-flash-low": {"disabled": False},
+        "gemini-3.8-flash-high": {"disabled": True, "tagDescription": "High reasoning access denied"},
+    })
+    def test_disabled_requested_variant_fails_before_inference_or_account_rotation(self, catalog, _keychain):
+        client = QuotaClient()
+        store = FakeStore()
+        with self.assertRaises(AntigravityError) as raised:
+            generate_chat_completion({
+                "model": "google-antigravity/gemini-3.8-flash",
+                "messages": [{"role": "user", "content": "ping"}],
+                "reasoning_effort": "high",
+            }, client=client, store=store)
+        self.assertEqual(raised.exception.status, 403)
+        self.assertEqual(str(raised.exception), "High reasoning access denied")
+        self.assertEqual(client.calls, [])
+        catalog.assert_called_once_with("tok-a", "p")
+        self.assertEqual([(creds["email"], active) for creds, active in store.saved], [
+            ("a@example.com", False),
+        ])
+
+    def test_disabled_runtime_candidates_are_excluded(self):
+        request = ChatRequest(model="google-antigravity/gemini-4-argon", messages=[], reasoning_effort="high")
+        catalog = {"gemini-4-argon-high": {"disabled": True}, "gemini-4-argon-low": {"disabled": False}}
+        self.assertNotIn("gemini-4-argon-high", _runtime_candidates(request, catalog))
+
     def test_runtime_candidates_include_38_37_36(self):
         request = ChatRequest(
             model="google-antigravity/gemini-3.8-flash",
@@ -92,7 +163,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result["choices"][0]["message"]["content"], "ok")
         self.assertEqual(client.calls[0][1], "gemini-3.8-flash-high")
         self.assertEqual(client.calls[1][1], "gemini-3.7-flash-high")
-        _catalog.assert_not_called()
+        _catalog.assert_called_once_with("tok-a", "p")
 
     @patch("hermes_antigravity.runtime.load_agy_keychain_credentials", return_value={})
     @patch(
@@ -104,12 +175,13 @@ class RuntimeTests(unittest.TestCase):
             }
         },
     )
-    def test_live_discovery_runs_after_static_404_chain(self, catalog, _keychain):
+    def test_preflight_discovery_preserves_static_404_chain(self, catalog, _keychain):
         class TieredClient:
             def __init__(self):
                 self.calls = []
 
             def generate(self, *, access_token, body):
+                catalog.assert_called_once_with("tok-a", "p")
                 self.calls.append(body["model"])
                 if body["model"] != "gemini-3.8-flash-tiered":
                     raise AntigravityError("model not found", status=404)
@@ -186,6 +258,29 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(client.calls[0], "gemini-3.9-flash-high")
         catalog.assert_called_once()
 
+    @patch("hermes_antigravity.runtime.load_agy_keychain_credentials", return_value={})
+    @patch("hermes_antigravity.runtime.fetch_available_models", return_value={
+        "gemini-4-argon-low": {"disabled": False},
+        "gemini-4-argon-medium": {"disabled": False},
+        "gemini-4-argon-high": {"disabled": False},
+    })
+    def test_enabled_argon_defaults_to_medium_during_live_resolution(self, catalog, _keychain):
+        client = FallbackClient()
+        with patch.object(client, "generate", wraps=client.generate) as generate:
+            result = generate_chat_completion({
+                "model": "google-antigravity/gemini-4-argon",
+                "messages": [{"role": "user", "content": "ping"}],
+            }, client=client, store=FakeStore())
+        self.assertEqual(result["choices"][0]["message"]["content"], "ok")
+        generate.assert_called_once()
+        body = generate.call_args.kwargs["body"]
+        self.assertEqual(body["model"], "gemini-4-argon-medium")
+        thinking = body["request"]["generationConfig"]["thinkingConfig"]
+        self.assertEqual(thinking["thinkingLevel"], "MEDIUM")
+        self.assertNotIn("thinkingBudget", thinking)
+        self.assertEqual(client.calls, [("tok-a", "gemini-4-argon-medium")])
+        catalog.assert_called_once_with("tok-a", "p")
+
     @patch("hermes_antigravity.runtime.time.sleep", return_value=None)
     @patch("hermes_antigravity.runtime.load_agy_keychain_credentials", return_value={})
     @patch("hermes_antigravity.runtime.fetch_available_models", return_value={})
@@ -241,7 +336,7 @@ class RuntimeTests(unittest.TestCase):
             "expires_at": 99999999999,
         },
     )
-    def test_post_refresh_404_can_discover_runtime(self, refresh, catalog, _keychain):
+    def test_post_refresh_404_uses_preflight_discovered_runtime(self, refresh, catalog, _keychain):
         class RefreshStore:
             def ordered_credentials(self):
                 return [

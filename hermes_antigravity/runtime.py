@@ -11,9 +11,11 @@ from .errors import AntigravityError, TokenExpired
 from .models import (
     DEFAULT_MODEL,
     KNOWN_MODELS,
+    clamp_reasoning_effort,
     get_fallback_runtime_model,
     get_model_enum,
-    normalize_effort,
+    is_disabled_runtime,
+    model_unavailable_reason,
     public_models_from_catalog,
     resolve_wire_model_id,
     strip_provider_prefix,
@@ -136,10 +138,11 @@ def _catalog_runtime(
     logical_model: str,
     effort: str | None,
 ) -> str | None:
+    catalog = {key: value for key, value in catalog.items() if not is_disabled_runtime(key, value)}
     if not catalog:
         return None
     logical = strip_provider_prefix(logical_model)
-    level = normalize_effort(effort)
+    level = clamp_reasoning_effort(logical, effort)
     requested = resolve_wire_model_id(logical, level)
     if requested in catalog:
         return requested
@@ -178,12 +181,14 @@ def _runtime_candidates(
     request: ChatRequest,
     catalog: dict[str, Any],
 ) -> list[str]:
+    if model_unavailable_reason(catalog, request.model):
+        return []
     static_runtime = resolve_wire_model_id(request.model, request.reasoning_effort)
     dynamic_runtime = _catalog_runtime(catalog, request.model, request.reasoning_effort)
 
     candidates: list[str] = []
     ordered_initial = (
-        (static_runtime, dynamic_runtime)
+        (static_runtime,)
         if request.model in KNOWN_MODELS
         else (dynamic_runtime, static_runtime)
     )
@@ -199,7 +204,11 @@ def _runtime_candidates(
         if fallback not in candidates:
             candidates.append(fallback)
         current = fallback
-    return candidates
+    # Keep known-model rollout fallbacks ahead of discovered aliases, while
+    # still checking the catalog for denials before any candidate is called.
+    if request.model in KNOWN_MODELS and dynamic_runtime and dynamic_runtime not in candidates:
+        candidates.append(dynamic_runtime)
+    return [candidate for candidate in candidates if not model_unavailable_reason(catalog, candidate)]
 
 
 def _access_token(credentials: dict[str, Any]) -> str:
@@ -244,6 +253,8 @@ def generate_chat_completion(
     store: CredentialStore | None = None,
 ) -> dict[str, Any]:
     request = parse_chat_request(payload)
+    if reason := model_unavailable_reason({}, request.model):
+        raise AntigravityError(reason, status=403)
     client = client or AntigravityClient()
     store = store or CredentialStore.default()
 
@@ -266,39 +277,23 @@ def generate_chat_completion(
 
         access_token = _access_token(credentials)
         project_id = _project_id(credentials)
-        is_known_model = request.model in KNOWN_MODELS
-        catalog: dict[str, Any] = {}
-        discovery_attempted = False
+        # Discovery uses the existing TTL cache. Even known routes must honor
+        # this account's explicit denials before inference or quota rotation.
+        try:
+            catalog = fetch_available_models(access_token, project_id)
+        except Exception:
+            catalog = {}
 
-        # Known models use their verified static route immediately for lower
-        # time-to-first-token. Unknown/future models need discovery up front.
-        if not is_known_model:
-            discovery_attempted = True
-            try:
-                catalog = fetch_available_models(access_token, project_id)
-            except Exception:
-                catalog = {}
-
+        if reason := model_unavailable_reason(catalog, request.model):
+            raise AntigravityError(reason, status=403)
+        requested_runtime = resolve_wire_model_id(request.model, request.reasoning_effort)
+        if reason := model_unavailable_reason(catalog, requested_runtime):
+            raise AntigravityError(reason, status=403)
         runtimes = _runtime_candidates(request, catalog)
+        if not runtimes:
+            raise AntigravityError("Requested Antigravity model variant is disabled.", status=403)
         refreshed_once = False
         runtime_index = 0
-
-        def append_dynamic_runtime_if_needed() -> None:
-            nonlocal catalog, discovery_attempted
-            if discovery_attempted:
-                return
-            discovery_attempted = True
-            try:
-                catalog = fetch_available_models(access_token, project_id)
-            except Exception:
-                catalog = {}
-            dynamic_runtime = _catalog_runtime(
-                catalog,
-                request.model,
-                request.reasoning_effort,
-            )
-            if dynamic_runtime and dynamic_runtime not in runtimes:
-                runtimes.append(dynamic_runtime)
 
         while runtime_index < len(runtimes):
             runtime_model = runtimes[runtime_index]
@@ -334,8 +329,6 @@ def generate_chat_completion(
                 except Exception as retry_exc:
                     last_error = retry_exc
                     if isinstance(retry_exc, AntigravityError) and retry_exc.status == 404:
-                        if runtime_index >= len(runtimes):
-                            append_dynamic_runtime_if_needed()
                         continue
                     if isinstance(retry_exc, AntigravityError) and _is_hard_quota_error(retry_exc):
                         break
@@ -343,11 +336,6 @@ def generate_chat_completion(
             except AntigravityError as exc:
                 last_error = exc
                 if exc.status == 404:
-                    # Known routes intentionally skip discovery on the fast
-                    # path. Only after static candidates fail do we ask the
-                    # account catalog for rollout aliases/tiered runtimes.
-                    if runtime_index >= len(runtimes):
-                        append_dynamic_runtime_if_needed()
                     continue
                 if _is_hard_quota_error(exc):
                     break
@@ -419,7 +407,7 @@ def ensure_provider_profile_files(root: Path | None = None) -> Path:
     (plugin_dir / "plugin.yaml").write_text(
         "name: antigravity\n"
         "kind: model-provider\n"
-        "version: 1.0.1\n"
+        "version: 1.0.2\n"
         "description: Google Antigravity provider supplied by hermes-antigravity\n",
         encoding="utf-8",
     )

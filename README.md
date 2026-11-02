@@ -21,6 +21,7 @@ agents:
 - authenticated `fetchAvailableModels` model discovery;
 - automatic grouping of runtime thinking variants into public model families;
 - Gemini 3.8 / 3.7 / 3.6 / 3.5 Flash routing;
+- Gemini 4 Argon low / medium / high routing when enabled in the account catalog;
 - Gemini 3.1 Pro, Claude 4.6, and GPT-OSS routing;
 - `model_enum` discovery with static fallbacks;
 - Gemini thinking budgets and Hermes reasoning-level mapping;
@@ -95,24 +96,51 @@ The authenticated catalog is also inspected at runtime. Newly exposed Gemini,
 Claude, or GPT-OSS families can therefore appear without waiting for the static
 fallback table to be updated.
 
+### Gemini 4 Argon and account availability
+
+Version 1.0.2 uses the Antigravity CLI `1.4.3` client identifier for discovery
+and inference. Google varies the returned catalog by client version; older
+identifiers can omit Argon entirely. Existing environment overrides still win.
+
+Argon is discovered from the authenticated catalog, not advertised as an
+offline fallback. When available, select `google-antigravity/gemini-4-argon`;
+the provider maps it to the low, medium, or high runtime variant and obtains
+its model enum from the live catalog. No enum or account eligibility is guessed.
+
+Entries marked `disabled: true` or ending in `-disabled` are not selectable.
+An explicit catalog denial produces a 403 with the server's explanation before
+inference; the request does not rotate accounts to work around that denial.
+The raw runtime list can still show a disabled entry for diagnostics.
+In particular, `gemini-4-argon-disabled` is not a callable model. Updating this
+plugin cannot grant access to a model that Google has disabled for the account.
+Google AI Pro tier metadata alone does not distinguish all subscription eligibility.
+
+See [Antigravity model availability](https://antigravity.google/docs/models/)
+and [Gemini thinking levels](https://ai.google.dev/gemini-api/docs/generate-content/thinking).
+
 ## Reasoning
 
 Hermes reasoning levels are mapped to the runtime variants currently used by
 Antigravity.
 
-| Public model | Hermes reasoning | Runtime behavior |
-| --- | --- | --- |
-| Gemini 3.8/3.7/3.6 Flash | off | low runtime, thoughts disabled |
-| Gemini 3.8/3.7/3.6 Flash | low | low runtime, budget 1000 |
-| Gemini 3.8/3.7/3.6 Flash | medium | medium runtime, budget 4000 |
-| Gemini 3.8/3.7/3.6 Flash | high | high runtime, dynamic budget -1 |
-| Gemini 3.5 Flash | low / medium / high | extra-low / low / agent runtime |
-| Gemini 3.1 Pro | low / high | low / agent runtime |
-| Claude 4.6 | high | thinking-enabled runtime |
-| GPT-OSS 120B | medium | medium runtime |
+| Public model             | Hermes reasoning    | Runtime behavior                          |
+| ------------------------ | ------------------- | ----------------------------------------- |
+| Gemini 4 Argon           | unspecified         | medium runtime, `thinkingLevel: MEDIUM`   |
+| Gemini 4 Argon           | off / low           | low runtime, `thinkingLevel: LOW`         |
+| Gemini 4 Argon           | medium / high       | corresponding runtime and `thinkingLevel` |
+| Gemini 3.8/3.7/3.6 Flash | off                 | low runtime, thoughts disabled            |
+| Gemini 3.8/3.7/3.6 Flash | low                 | low runtime, budget 1000                  |
+| Gemini 3.8/3.7/3.6 Flash | medium              | medium runtime, budget 4000               |
+| Gemini 3.8/3.7/3.6 Flash | high                | high runtime, dynamic budget -1           |
+| Gemini 3.5 Flash         | low / medium / high | extra-low / low / agent runtime           |
+| Gemini 3.1 Pro           | low / high          | low / agent runtime                       |
+| Claude 4.6               | high                | thinking-enabled runtime                  |
+| GPT-OSS 120B             | medium              | medium runtime                            |
 
-If Hermes does not explicitly enable reasoning, the provider keeps thoughts
-disabled rather than silently spending thinking tokens.
+For the existing models, unspecified reasoning keeps the existing thinking-budget
+behavior. Argon cannot disable thinking: `off` selects the lowest supported level
+and hides thought output, while unspecified reasoning uses medium. Argon uses
+`thinkingLevel`, never `thinkingBudget`, and does not fall back to a Flash model.
 
 ## Commands
 
@@ -156,14 +184,17 @@ For a request such as Gemini 3.8 Flash High, the port behaves approximately as:
 Hermes
   ↓
 gemini-3.8-flash-high
-  ↓ 404 / unavailable
+  ↓ 404 / model not found
 gemini-3.7-flash-high
-  ↓ 404 / unavailable
+  ↓ 404 / model not found
 gemini-3.6-flash-high
 ```
 
-Before inference, `fetchAvailableModels` is queried and cached. Live
-`model_enum` values override static fallback enums.
+Before inference on each account, including for known static models,
+`fetchAvailableModels` is queried or its existing 30-minute cache is reused.
+Explicit catalog denials stop the request without inference or account rotation.
+Known routes retain their static 404 fallback order before trying discovered
+aliases. Live `model_enum` values override static fallback enums.
 
 Model discovery failure does not block inference; the conservative routing table
 is still usable.
@@ -219,7 +250,7 @@ Python port:
 ```bash
 python -m pip install -e .
 python -m compileall -q hermes_antigravity tests
-python -m unittest discover -v
+python -m unittest discover -s tests -v
 ```
 
 The repository also retains upstream TypeScript tests as a protocol-reference

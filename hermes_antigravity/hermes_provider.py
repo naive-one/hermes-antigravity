@@ -30,6 +30,8 @@ def _reasoning_effort(reasoning_config: dict | None, model: str | None = None) -
 
 def _efforts_for(model: str | None) -> tuple[str, ...] | None:
     logical = strip_provider_prefix(model or DEFAULT_MODEL)
+    if logical == "gemini-4-argon" or logical.startswith("gemini-4-argon-"):
+        return ("low", "medium", "high")
     if logical.startswith("gemini-") and "flash" in logical:
         return ("low", "medium", "high")
     if logical == "gemini-3.1-pro":

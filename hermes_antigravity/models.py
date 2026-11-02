@@ -18,6 +18,11 @@ KNOWN_MODELS: dict[str, int] = {
 }
 
 ROUTING: dict[str, dict[str, str]] = {
+    "gemini-4-argon": {
+        "low": "gemini-4-argon-low",
+        "medium": "gemini-4-argon-medium",
+        "high": "gemini-4-argon-high",
+    },
     "gemini-3.8-flash": {
         "off": "gemini-3.8-flash-low",
         "low": "gemini-3.8-flash-low",
@@ -168,6 +173,10 @@ def normalize_effort(value: str | None) -> str:
 def clamp_reasoning_effort(model: str, effort: str | None = None) -> str:
     logical = strip_provider_prefix(normalize_model_id(model))
     level = normalize_effort(effort)
+    if logical == "gemini-4-argon":
+        if effort is None or not str(effort).strip():
+            return "medium"
+        return "low" if level == "off" else level
     if level == "off":
         return "off"
     if logical == "gemini-3.1-pro":
@@ -254,6 +263,7 @@ def public_model_from_runtime(runtime_id: str) -> str | None:
         return aliases[rid]
 
     for suffix in (
+        "-disabled",
         "-extra-low",
         "-extra-high",
         "-minimal",
@@ -273,8 +283,39 @@ def public_model_from_runtime(runtime_id: str) -> str | None:
     return None
 
 
+def is_disabled_runtime(runtime_id: str, info: Any = None) -> bool:
+    return runtime_id.endswith("-disabled") or (
+        isinstance(info, dict) and info.get("disabled") is True
+    )
+
+
+def model_unavailable_reason(models: dict[str, Any], model: str) -> str | None:
+    """Honor explicit server denials without treating an absent model as denied."""
+    runtime_id = strip_provider_prefix(model)
+    info = models.get(runtime_id)
+    denied = []
+    if is_disabled_runtime(runtime_id, info):
+        denied = [info]
+    else:
+        family = public_model_from_runtime(runtime_id)
+        entries = [
+            (key, value) for key, value in models.items()
+            if family and public_model_from_runtime(key) == family
+        ]
+        if entries and all(is_disabled_runtime(key, value) for key, value in entries):
+            denied = [value for _, value in entries]
+    if not denied:
+        return None
+    for entry in denied:
+        if isinstance(entry, dict) and entry.get("tagDescription"):
+            return str(entry["tagDescription"])
+    return f"{runtime_id} is disabled for the active Antigravity account."
+
+
 def _selectable_runtime(runtime_id: str, info: Any = None) -> bool:
     rid = (runtime_id or "").strip()
+    if is_disabled_runtime(rid, info):
+        return False
     if not (
         rid.startswith("gemini-")
         or rid.startswith("claude-")
@@ -309,7 +350,10 @@ def public_models_from_catalog(models: dict[str, Any] | None) -> list[str]:
 
     # Keep known, tested families first. New account-visible families are then
     # appended automatically, matching pi-antigravity's discovery-first model.
-    ordered = list(KNOWN_MODELS)
+    ordered = [
+        model for model in KNOWN_MODELS
+        if not model_unavailable_reason(models or {}, model)
+    ]
     for model in dynamic:
         if model not in ordered:
             ordered.append(model)

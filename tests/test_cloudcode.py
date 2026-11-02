@@ -9,6 +9,11 @@ from hermes_antigravity.cloudcode import (
 
 
 class CloudCodeTests(unittest.TestCase):
+    @patch.dict("os.environ", {"ANTIGRAVITY_USER_AGENT": "", "ANTIGRAVITY_CLI_VERSION": "", "PI_AI_ANTIGRAVITY_VERSION": ""})
+    def test_default_client_version_exposes_current_catalog(self):
+        from hermes_antigravity.cloudcode import antigravity_user_agent
+        self.assertTrue(antigravity_user_agent().startswith("antigravity/cli/1.4.3 "))
+
     def test_stable_project_id_is_deterministic_uuid(self):
         first = stable_project_id("user@example.com")
         second = stable_project_id("user@example.com")

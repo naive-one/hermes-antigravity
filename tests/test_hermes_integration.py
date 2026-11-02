@@ -42,6 +42,10 @@ class HermesIntegrationTests(unittest.TestCase):
             self.assertTrue(module.register_provider_profile())
 
         self.assertEqual(captured["profile"].name, "antigravity")
+        self.assertEqual(
+            captured["profile"].supported_reasoning_efforts("google-antigravity/gemini-4-argon"),
+            ("low", "medium", "high"),
+        )
 
     def test_provider_profile_supplies_native_auxiliary_client(self):
         try:
